@@ -7,9 +7,12 @@ Strategy:
   or after max_hold bars.
 - Skip new entries when volatility is in its top percentile (crashes, news spikes).
 
-Sizing: a Beta posterior on the win rate plus the running average win and loss
-give the Kelly leverage f* = (p - (1 - p) / b) / avg_loss. We use a quarter of it,
-and risk.py caps every order at 2x equity no matter what.
+Trend filter: a 200 EMA on 4h bars. Above it only longs are allowed, below it only shorts.
+
+Sizing (RiskController): fixed 0.5x for the first 30 trades. After that a Beta
+posterior on the win rate plus the running average win and loss give the Kelly
+leverage f* = (p - (1 - p) / b) / avg_loss, used at a quarter, and only while it
+is positive. risk.py caps every order at 2x equity no matter what.
 
 Account rules (GMO 暗号資産FX): 0.03% taker fee on ADA_JPY, 0.04% of position value per day
 for positions held at the 06:00 JST rollover, loss cut at 75% maintenance ratio.
@@ -43,7 +46,11 @@ class MeanRevConfig:
     kelly_fraction: float = 0.25
     prior_alpha: float = 2.0
     prior_beta: float = 2.0
-    payoff_min_trades: int = 10
+    cold_start_trades: int = 30  # below this many trades, use the fixed size, not Kelly
+    cold_start_leverage: float = 0.5
+    trend_filter: bool = True  # above the 4h EMA: longs only; below: shorts only
+    trend_timeframe: str = "4h"
+    trend_ema: int = 200
 
 
 @dataclass
@@ -57,15 +64,34 @@ class AccountConfig:
     size_step: float = 10.0
 
 
-class LeverageKelly(BayesKelly):
-    """Kelly for a position whose wins and losses are small fractions of its value."""
+class RiskController(BayesKelly):
+    """Decides leverage per trade.
 
-    def leverage(self) -> float:
-        if len(self.wins) + len(self.losses) < self.cfg.payoff_min_trades or not self.losses or not self.wins:
+    Cold start: until `cold_start_trades` trades are recorded, a fixed small
+    leverage. After that, quarter Kelly for a position whose wins and losses are
+    small fractions of its value: f* = (p - (1 - p) / b) / avg_loss. Kelly is above
+    zero only when the expected value per trade is positive, so a losing record
+    means no position. The result never exceeds risk.MAX_LEVERAGE.
+    """
+
+    def __init__(self, cfg: StrategyConfig, cold_start_trades: int, cold_start_leverage: float):
+        super().__init__(cfg)
+        self.cold_start_trades = cold_start_trades
+        self.cold_start_leverage = cold_start_leverage
+
+    @property
+    def n_trades(self) -> int:
+        return len(self.wins) + len(self.losses)
+
+    def kelly_leverage(self) -> float:
+        if not self.losses or not self.wins:
             return 0.0
         avg_loss = float(np.mean(self.losses))
-        f = (self.win_prob - (1 - self.win_prob) / self.payoff) / avg_loss
-        return float(min(max(f * self.cfg.kelly_fraction, 0.0), risk.MAX_LEVERAGE))
+        return (self.win_prob - (1 - self.win_prob) / self.payoff) / avg_loss * self.cfg.kelly_fraction
+
+    def leverage(self) -> float:
+        f = self.cold_start_leverage if self.n_trades < self.cold_start_trades else self.kelly_leverage()
+        return float(min(max(f, 0.0), risk.MAX_LEVERAGE))
 
 
 @dataclass
@@ -109,6 +135,20 @@ def compute_features(df: pd.DataFrame, cfg: MeanRevConfig) -> pd.DataFrame:
     vol = np.log(out["close"]).diff().rolling(cfg.vol_window).std()
     vol_pct = vol.rolling(cfg.vol_rank_window, min_periods=cfg.vol_window * 2).rank(pct=True)
     out["vol_ok"] = vol_pct <= cfg.vol_max_pct
+    if cfg.trend_filter:
+        # EMA on completed higher-timeframe bars only: a 4h bar's EMA is usable from its close on.
+        tf = pd.Timedelta(cfg.trend_timeframe)
+        htf_close = out["close"].resample(tf, label="left", closed="left").last().dropna()
+        ema = htf_close.ewm(span=cfg.trend_ema, adjust=False, min_periods=cfg.trend_ema).mean()
+        ema.index = ema.index + tf
+        step = out.index.to_series().diff().min() if len(out) > 1 else pd.Timedelta(hours=1)
+        bar_close = out.index + step
+        out["trend_ema"] = ema.reindex(bar_close, method="ffill").to_numpy()
+        out["long_ok"] = out["close"] > out["trend_ema"]
+        out["short_ok"] = out["close"] < out["trend_ema"]
+    else:
+        out["trend_ema"] = np.nan
+        out["long_ok"] = out["short_ok"] = True
     return out
 
 
@@ -125,8 +165,10 @@ def run(df: pd.DataFrame, cfg: MeanRevConfig | None = None, acct_cfg: AccountCon
     z, vol_ok = f["z"].to_numpy(), f["vol_ok"].to_numpy()
     jst_hour = f.index.tz_convert("Asia/Tokyo").hour
 
-    kelly = LeverageKelly(StrategyConfig(prior_alpha=cfg.prior_alpha, prior_beta=cfg.prior_beta,
-                                         payoff_min_trades=cfg.payoff_min_trades, kelly_fraction=cfg.kelly_fraction))
+    long_ok, short_ok = f["long_ok"].to_numpy(), f["short_ok"].to_numpy()
+    kelly = RiskController(StrategyConfig(prior_alpha=cfg.prior_alpha, prior_beta=cfg.prior_beta,
+                                          kelly_fraction=cfg.kelly_fraction),
+                           cfg.cold_start_trades, cfg.cold_start_leverage)
     acct = MarginAccount(acct_cfg.initial_jpy)
     side, sig_entry, sig_bars, sig_days, entry_time, sig_qty = 0, 0.0, 0, 0, None, 0.0
     pending: tuple[str, float] | None = None
@@ -138,7 +180,7 @@ def run(df: pd.DataFrame, cfg: MeanRevConfig | None = None, acct_cfg: AccountCon
         ret = side * (px / sig_entry - 1) - acct_cfg.leverage_fee_per_day * sig_days
         kelly.update(ret)
         trades.append({"entry_time": entry_time, "exit_time": f.index[t], "side": side, "entry_px": sig_entry,
-                       "exit_px": px, "qty": sig_qty, "return": ret, "reason": reason, "kelly_lev_after": kelly.leverage()})
+                       "exit_px": px, "qty": sig_qty, "return": ret, "reason": reason, "lev_after": kelly.leverage()})
         side = 0
 
     def fill_price(price: float, delta: float) -> float:
@@ -198,6 +240,8 @@ def run(df: pd.DataFrame, cfg: MeanRevConfig | None = None, acct_cfg: AccountCon
                 pending = ("trim", acct.qty)  # price moved against us: cut back to 2x
         elif vol_ok[t] and abs(z[t]) >= cfg.entry_z:
             direction = -1 if z[t] > 0 else 1
+            if not (long_ok[t] if direction > 0 else short_ok[t]):
+                continue  # against the 4h trend
             qty = direction * kelly.leverage() * equity[t] / c[t]
             pending = ("long" if direction > 0 else "short", qty)
 
