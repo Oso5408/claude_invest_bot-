@@ -79,9 +79,20 @@ class RiskController(BayesKelly):
         self.cold_start_trades = cold_start_trades
         self.cold_start_leverage = cold_start_leverage
 
+    def seed_prior(self, win_rate: float, payoff: float, avg_loss: float, weight: int) -> None:
+        """Start from `weight` imaginary trades with this win rate, payoff ratio and average loss.
+
+        Real trades are added on top, so the prior fades as evidence builds up.
+        """
+        n_win = max(1, round(win_rate * weight))
+        self.alpha, self.beta = win_rate * weight, (1 - win_rate) * weight
+        self.wins = [payoff * avg_loss] * n_win
+        self.losses = [avg_loss] * max(1, weight - n_win)
+        self._seeded = len(self.wins) + len(self.losses)
+
     @property
     def n_trades(self) -> int:
-        return len(self.wins) + len(self.losses)
+        return len(self.wins) + len(self.losses) - getattr(self, "_seeded", 0)
 
     def kelly_leverage(self) -> float:
         if not self.losses or not self.wins:

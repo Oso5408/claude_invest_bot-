@@ -71,6 +71,12 @@ def fetch_range(symbol: str, interval: str, start: date, end: date, pause: float
     return df[~df.index.duplicated(keep="last")].sort_index()
 
 
+def resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """Combine bars into a longer timeframe, e.g. "4h". Bars are labelled by their open time."""
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+    return df.resample(rule, label="left", closed="left").agg(agg).dropna()
+
+
 def load_csv(path: str | Path) -> pd.DataFrame:
     df = pd.read_csv(path, parse_dates=["open_time"], index_col="open_time")
     if df.index.tz is None:

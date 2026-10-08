@@ -75,6 +75,22 @@ python -m btcbot.meanrev --csv data/ADA_JPY_1hour.csv
 | 斬倉 | 保證金維持率跌到 75% 即時斬倉 |
 | 交易費 | ADA_JPY taker 0.03%（maker 0%），另外每次成交計 0.05% 滑價。最少 10 ADA，每 10 ADA 一個單位 |
 
+## 策略 B：突破 + 移動止損（`btcbot/breakout.py`）
+
+```bash
+python -m btcbot.breakout --csv data/ADA_JPY_1hour.csv                  # 1 小時 K 線
+python -m btcbot.breakout --csv data/ADA_JPY_1hour.csv --timeframe 4h   # 合併成 4 小時 K 線
+python -m btcbot.breakout --csv data/ADA_JPY_1hour.csv --no-short       # 只做多
+```
+
+| 部分 | 做咩 |
+|---|---|
+| 做多 | 收市價突破之前 20 條 K 線最高價，而且成交量大過之前 20 條平均嘅 1.2 倍 |
+| 做空 | 收市價跌穿之前 10 條 K 線最低價 |
+| 平倉 | 只用移動止損：入市價 ∓ 2 × ATR(14)，之後跟住最好價格移動，只會收緊唔會放鬆 |
+| 注碼 | RiskController 預設勝率 35%、盈虧比 2.5、平均虧損 2%（當做已經有 30 單），第一單起用四分一 Kelly（約 1.1 倍），之後按真實交易更新 |
+| 風控 | 同均值回歸一樣：2 倍上限、手續費、槓桿費、75% 斬倉 |
+
 ## 測試
 
 ```bash
