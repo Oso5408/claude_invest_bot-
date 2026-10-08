@@ -97,15 +97,51 @@ def fetch_rules(symbol: str) -> dict:
     raise ValueError(f"{symbol} not listed by GMO Coin")
 
 
+FNG_URL = "https://api.alternative.me/fng/"
+
+
+def parse_fng(payload: dict) -> pd.Series:
+    """alternative.me Crypto Fear & Greed Index: one value (0-100) per UTC day."""
+    rows = payload.get("data") or []
+    if not rows:
+        raise RuntimeError(f"Fear & Greed API returned no data: {payload.get('metadata')}")
+    idx = pd.to_datetime([int(r["timestamp"]) for r in rows], unit="s", utc=True)
+    s = pd.Series([float(r["value"]) for r in rows], index=idx, name="fng")
+    s.index.name = "date"
+    return s[~s.index.duplicated()].sort_index()
+
+
+def fetch_fng() -> pd.Series:
+    """Full daily history (starts 2018-02). Free, no key."""
+    resp = requests.get(FNG_URL, params={"limit": 0, "format": "json"}, timeout=30)
+    resp.raise_for_status()
+    return parse_fng(resp.json())
+
+
+def load_fng(path: str | Path) -> pd.Series:
+    s = pd.read_csv(path, parse_dates=["date"], index_col="date")["fng"]
+    if s.index.tz is None:
+        s.index = s.index.tz_localize("UTC")
+    return s
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description="Download GMO Coin klines to CSV")
     p.add_argument("--symbol", default="BTC", help="BTC, ADA = spot (priced in JPY); BTC_JPY, ADA_JPY = leverage")
     p.add_argument("--interval", default="1hour")
     p.add_argument("--start", help="YYYY-MM-DD (ADA_JPY leverage trading began 2024-05-25)")
     p.add_argument("--rules", action="store_true", help="print the symbol's order rules and exit")
+    p.add_argument("--fng", action="store_true", help="download the Fear & Greed Index to data/fear_greed.csv and exit")
     p.add_argument("--end", default=None, help="YYYY-MM-DD, default yesterday (UTC)")
     p.add_argument("--out", default=None, help="CSV path, default data/<symbol>_<interval>.csv")
     args = p.parse_args(argv)
+    if args.fng:
+        out = Path(args.out or "data/fear_greed.csv")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        fng = fetch_fng()
+        fng.to_csv(out)
+        print(f"Saved {len(fng)} days ({fng.index[0].date()} to {fng.index[-1].date()}) to {out}")
+        return
     if args.rules:
         print(fetch_rules(args.symbol))
         return

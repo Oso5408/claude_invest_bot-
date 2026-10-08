@@ -47,9 +47,23 @@ class BreakoutConfig:
     prior_payoff: float = 2.5
     prior_avg_loss: float = 0.02
     prior_weight: int = 30
+    # Fear & Greed filter (0 = extreme fear, 100 = extreme greed). A new entry is only
+    # taken when the index is inside the band for its side. Defaults let everything through.
+    fng_long_min: float = 0
+    fng_long_max: float = 100
+    fng_short_min: float = 0
+    fng_short_max: float = 100
 
 
-def compute_features(df: pd.DataFrame, cfg: BreakoutConfig) -> pd.DataFrame:
+def align_fng(index: pd.DatetimeIndex, fng: pd.Series) -> pd.Series:
+    """Fear & Greed value known at each bar. The value stamped day D (00:00 UTC) is only
+    used from D + 1 day, so a bar never sees a value that may not have been published yet."""
+    known = fng.copy()
+    known.index = known.index + pd.Timedelta(days=1)
+    return known.reindex(index, method="ffill")
+
+
+def compute_features(df: pd.DataFrame, cfg: BreakoutConfig, fng: pd.Series | None = None) -> pd.DataFrame:
     out = df.copy()
     prev_close = out["close"].shift()
     tr = pd.concat([out["high"] - out["low"], (out["high"] - prev_close).abs(),
@@ -67,6 +81,12 @@ def compute_features(df: pd.DataFrame, cfg: BreakoutConfig) -> pd.DataFrame:
         out["trend_ema"] = htf_ema(out, cfg.trend_timeframe, cfg.trend_ema)
         out["long_signal"] &= out["close"] > out["trend_ema"]
         out["short_signal"] &= out["close"] < out["trend_ema"]
+    if fng is not None:
+        # unknown index (before the history starts) blocks nothing
+        out["fng"] = align_fng(out.index, fng)
+        v = out["fng"]
+        out["long_signal"] &= v.isna() | v.between(cfg.fng_long_min, cfg.fng_long_max)
+        out["short_signal"] &= v.isna() | v.between(cfg.fng_short_min, cfg.fng_short_max)
     return out
 
 
@@ -79,10 +99,11 @@ def mtf_config(**overrides) -> BreakoutConfig:
     return BreakoutConfig(**base)
 
 
-def run(df: pd.DataFrame, cfg: BreakoutConfig | None = None, acct_cfg: AccountConfig | None = None) -> Result:
+def run(df: pd.DataFrame, cfg: BreakoutConfig | None = None, acct_cfg: AccountConfig | None = None,
+        fng: pd.Series | None = None) -> Result:
     cfg = cfg or BreakoutConfig()
     acct_cfg = acct_cfg or AccountConfig()
-    f = compute_features(df, cfg)
+    f = compute_features(df, cfg, fng)
     o, h, l, c = (f[k].to_numpy() for k in ("open", "high", "low", "close"))
     atr = f["atr"].to_numpy()
     long_sig, short_sig = f["long_signal"].to_numpy(), f["short_signal"].to_numpy()
@@ -182,6 +203,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--timeframe", default=None, help="resample the CSV first, e.g. 4h")
     p.add_argument("--mtf", action="store_true", help="multi-timeframe preset: 4h EMA50 + 1.5x volume breakout both ways")
     p.add_argument("--trades-out")
+    p.add_argument("--fng-csv", help="data/fear_greed.csv from `python -m btcbot.data --fng`")
+    p.add_argument("--fng-long", type=float, nargs=2, metavar=("MIN", "MAX"), default=(0, 100),
+                   help="only go long when the Fear & Greed Index is in this band")
+    p.add_argument("--fng-short", type=float, nargs=2, metavar=("MIN", "MAX"), default=(0, 100),
+                   help="only go short when the Fear & Greed Index is in this band")
     a = p.parse_args(argv)
 
     if a.csv:
@@ -191,9 +217,15 @@ def main(argv: list[str] | None = None) -> None:
         df = random_walk(start_price=100, vol=0.01, drift=0.0003)
     if a.timeframe:
         df = resample(df, a.timeframe)
-    opts = dict(allow_short=not a.no_short, max_leverage=a.max_leverage)
+    opts = dict(allow_short=not a.no_short, max_leverage=a.max_leverage,
+                fng_long_min=a.fng_long[0], fng_long_max=a.fng_long[1],
+                fng_short_min=a.fng_short[0], fng_short_max=a.fng_short[1])
     cfg = mtf_config(**opts) if a.mtf else BreakoutConfig(**opts)
-    res = run(df, cfg, AccountConfig(initial_jpy=a.jpy))
+    fng = None
+    if a.fng_csv:
+        from btcbot.data import load_fng
+        fng = load_fng(a.fng_csv)
+    res = run(df, cfg, AccountConfig(initial_jpy=a.jpy), fng)
     print(format_stats(res.stats))
     if a.trades_out:
         res.trades.to_csv(a.trades_out, index=False)

@@ -116,3 +116,23 @@ def test_soft_leverage_limit_for_spot():
     tr = res.trades[res.trades["qty"] != 0]
     assert len(tr) and (tr["qty"] > 0).all()
     assert (tr["qty"] * tr["entry_px"]).max() <= 1.0 * res.equity.max() * 1.001
+
+
+def test_fng_value_is_only_used_the_day_after_its_stamp():
+    from btcbot.breakout import align_fng
+    fng = pd.Series([10.0, 90.0], index=pd.to_datetime(["2025-01-01", "2025-01-02"], utc=True))
+    idx = pd.date_range("2025-01-01", periods=12, freq="4h", tz="UTC")
+    v = align_fng(idx, fng)
+    assert v.iloc[:6].isna().all()  # day 1: the day-1 value may not be out yet
+    assert (v.iloc[6:] == 10).all()  # day 2 sees day 1's value, not day 2's
+
+
+def test_fng_band_blocks_entries():
+    df = random_walk(n=3000, start_price=100, vol=0.01, drift=0.0003)
+    fng_hi = pd.Series(80.0, index=pd.date_range(df.index[0].floor("D") - pd.Timedelta(days=2),
+                                                 df.index[-1], freq="D", tz="UTC"))
+    base = compute_features(df, BreakoutConfig(), fng_hi)
+    assert base["long_signal"].any()  # default band 0-100 lets everything through
+    blocked = compute_features(df, BreakoutConfig(fng_long_max=75, fng_short_min=85), fng_hi)
+    assert not blocked["long_signal"].any() and not blocked["short_signal"].any()
+    assert len(run(df, BreakoutConfig(fng_long_max=75, fng_short_min=85), fng=fng_hi).trades) == 0
