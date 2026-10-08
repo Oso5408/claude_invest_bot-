@@ -136,3 +136,25 @@ def test_fng_band_blocks_entries():
     blocked = compute_features(df, BreakoutConfig(fng_long_max=75, fng_short_min=85), fng_hi)
     assert not blocked["long_signal"].any() and not blocked["short_signal"].any()
     assert len(run(df, BreakoutConfig(fng_long_max=75, fng_short_min=85), fng=fng_hi).trades) == 0
+
+
+def test_rollover_fee_charged_on_4h_and_15m_bars():
+    from btcbot.meanrev import rollover_counts
+    for freq, per_day in [("1h", 1), ("4h", 1), ("15min", 1)]:
+        idx = pd.date_range("2025-01-01", periods=int(pd.Timedelta("10D") / pd.Timedelta(freq)), freq=freq, tz="UTC")
+        n = rollover_counts(idx, 6)
+        assert n.sum() in (9, 10) and n.max() == per_day
+
+
+def test_funding_per_bar_sums_hours_and_charges_longs():
+    from btcbot.breakout import funding_per_bar
+    idx = pd.date_range("2025-01-01", periods=4, freq="4h", tz="UTC")
+    hours = pd.date_range("2025-01-01", periods=16, freq="1h", tz="UTC")
+    rates = pd.Series(0.0001, index=hours)
+    f = funding_per_bar(idx, rates)
+    assert f[0] == 0 and np.allclose(f[1:], 0.0004)
+    df = random_walk(n=3000, start_price=100, vol=0.01, drift=0.0003)
+    paid = pd.Series(0.0005, index=pd.date_range(df.index[0], df.index[-1], freq="1h"))
+    free = run(df, BreakoutConfig(allow_short=False), fng=None, funding=paid * 0)
+    cost = run(df, BreakoutConfig(allow_short=False), fng=None, funding=paid)
+    assert free.stats["leverage_fees_jpy"] == 0 and cost.stats["leverage_fees_jpy"] > 0

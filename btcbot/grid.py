@@ -28,7 +28,7 @@ import pandas as pd
 
 from btcbot import risk
 from btcbot.data import load_csv, resample
-from btcbot.meanrev import AccountConfig, MarginAccount, Result, _stats
+from btcbot.meanrev import AccountConfig, MarginAccount, Result, _stats, rollover_counts
 
 
 @dataclass
@@ -43,7 +43,7 @@ def run(df: pd.DataFrame, cfg: GridConfig | None = None, acct_cfg: AccountConfig
     cfg = cfg or GridConfig()
     acct_cfg = acct_cfg or AccountConfig()
     o, h, l, c = (df[k].to_numpy() for k in ("open", "high", "low", "close"))
-    jst_hour = df.index.tz_convert("Asia/Tokyo").hour
+    n_roll = rollover_counts(df.index, acct_cfg.rollover_hour_jst)
     half = cfg.levels // 2
     acct = MarginAccount(acct_cfg.initial_jpy)
     equity = np.empty(len(df))
@@ -108,8 +108,8 @@ def run(df: pd.DataFrame, cfg: GridConfig | None = None, acct_cfg: AccountConfig
 
     build(0, o[0])
     for t in range(len(df)):
-        if acct.qty and jst_hour[t] == acct_cfg.rollover_hour_jst:
-            acct.charge(acct_cfg.leverage_fee_per_day * abs(acct.qty) * o[t])
+        if acct.qty and n_roll[t]:
+            acct.charge(n_roll[t] * acct_cfg.leverage_fee_per_day * abs(acct.qty) * o[t])
 
         path = (o[t], l[t], h[t], c[t]) if c[t] >= o[t] else (o[t], h[t], l[t], c[t])
         for i, p in enumerate(path):

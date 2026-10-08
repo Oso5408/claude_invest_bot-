@@ -25,7 +25,8 @@ import pandas as pd
 
 from btcbot import risk
 from btcbot.data import load_csv, resample
-from btcbot.meanrev import AccountConfig, MarginAccount, Result, RiskController, _round_qty, _stats, htf_ema
+from btcbot.meanrev import (AccountConfig, MarginAccount, Result, RiskController, _round_qty, _stats, htf_ema,
+                            rollover_counts)
 from btcbot.strategy import StrategyConfig
 
 
@@ -99,20 +100,35 @@ def mtf_config(**overrides) -> BreakoutConfig:
     return BreakoutConfig(**base)
 
 
+def funding_per_bar(index: pd.DatetimeIndex, funding: pd.Series) -> np.ndarray:
+    """Sum of the hourly funding rates paid between the previous bar's open and this bar's open
+    (Hyperliquid: positive rate = longs pay shorts)."""
+    edges = index.as_unit("ns").asi8
+    times = funding.sort_index().index.as_unit("ns").asi8
+    cum = np.concatenate([[0.0], np.cumsum(funding.sort_index().to_numpy(dtype=float))])
+    pos = np.searchsorted(times, edges, side="left")
+    out = np.zeros(len(index))
+    out[1:] = cum[pos[1:]] - cum[pos[:-1]]
+    return out
+
+
 def run(df: pd.DataFrame, cfg: BreakoutConfig | None = None, acct_cfg: AccountConfig | None = None,
-        fng: pd.Series | None = None) -> Result:
+        fng: pd.Series | None = None, funding: pd.Series | None = None) -> Result:
+    """`funding`: hourly perp funding rates. When given it replaces the GMO daily leverage fee."""
     cfg = cfg or BreakoutConfig()
     acct_cfg = acct_cfg or AccountConfig()
     f = compute_features(df, cfg, fng)
     o, h, l, c = (f[k].to_numpy() for k in ("open", "high", "low", "close"))
     atr = f["atr"].to_numpy()
     long_sig, short_sig = f["long_signal"].to_numpy(), f["short_signal"].to_numpy()
-    jst_hour = f.index.tz_convert("Asia/Tokyo").hour
+    n_roll = rollover_counts(f.index, acct_cfg.rollover_hour_jst)
+    fund = funding_per_bar(f.index, funding) if funding is not None else None
 
     rc = RiskController(StrategyConfig(kelly_fraction=cfg.kelly_fraction), cold_start_trades=0, cold_start_leverage=0.0)
     rc.seed_prior(cfg.prior_win_rate, cfg.prior_payoff, cfg.prior_avg_loss, cfg.prior_weight)
     acct = MarginAccount(acct_cfg.initial_jpy)
     side, sig_entry, sig_days, entry_time, sig_qty = 0, 0.0, 0, None, 0.0
+    sig_funding = 0.0  # funding paid per unit of notional over the trade (negative = received)
     stop, best, entry_atr = 0.0, 0.0, 0.0
     pending: tuple[int, float, float] | None = None  # (direction, qty, atr at signal)
     equity = np.empty(len(f))
@@ -124,7 +140,8 @@ def run(df: pd.DataFrame, cfg: BreakoutConfig | None = None, acct_cfg: AccountCo
     def close_trade(t: int, px: float, reason: str) -> None:
         nonlocal side
         acct.set_position(0.0, px, acct_cfg.fee_rate)
-        ret = side * (px / sig_entry - 1) - acct_cfg.leverage_fee_per_day * sig_days - 2 * acct_cfg.fee_rate
+        carry = sig_funding if fund is not None else acct_cfg.leverage_fee_per_day * sig_days
+        ret = side * (px / sig_entry - 1) - carry - 2 * acct_cfg.fee_rate
         rc.update(ret)
         trades.append({"entry_time": entry_time, "exit_time": f.index[t], "side": side, "entry_px": sig_entry,
                        "exit_px": px, "qty": sig_qty, "return": ret, "reason": reason, "lev_after": rc.leverage()})
@@ -140,14 +157,19 @@ def run(df: pd.DataFrame, cfg: BreakoutConfig | None = None, acct_cfg: AccountCo
             cap_hits += capped != target
             acct.set_position(_round_qty(capped, acct_cfg), px, acct_cfg.fee_rate)
             side, sig_entry, sig_days, entry_time, sig_qty = direction, px, 0, f.index[t], acct.qty
+            sig_funding = 0.0
             best = px
             stop = px - side * cfg.atr_mult * entry_atr
 
-        # 2. leverage fee at the 06:00 JST rollover
-        if side and jst_hour[t] == acct_cfg.rollover_hour_jst:
-            sig_days += 1
+        # 2. carrying cost: GMO's daily leverage fee at the 06:00 JST rollover, or perp funding
+        if side and fund is not None:
+            if acct.qty and fund[t]:
+                acct.charge(fund[t] * acct.qty * o[t])
+                sig_funding += side * fund[t]
+        elif side and n_roll[t]:
+            sig_days += n_roll[t]
             if acct.qty:
-                acct.charge(acct_cfg.leverage_fee_per_day * abs(acct.qty) * o[t])
+                acct.charge(n_roll[t] * acct_cfg.leverage_fee_per_day * abs(acct.qty) * o[t])
 
         # 3. trailing stop, then the exchange loss cut, both inside the bar
         if side:
@@ -204,6 +226,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--mtf", action="store_true", help="multi-timeframe preset: 4h EMA50 + 1.5x volume breakout both ways")
     p.add_argument("--trades-out")
     p.add_argument("--fng-csv", help="data/fear_greed.csv from `python -m btcbot.data --fng`")
+    p.add_argument("--hl-funding", help="Hyperliquid funding CSV: use Hyperliquid fees/funding and a 200 USD account")
     p.add_argument("--fng-long", type=float, nargs=2, metavar=("MIN", "MAX"), default=(0, 100),
                    help="only go long when the Fear & Greed Index is in this band")
     p.add_argument("--fng-short", type=float, nargs=2, metavar=("MIN", "MAX"), default=(0, 100),
@@ -225,7 +248,11 @@ def main(argv: list[str] | None = None) -> None:
     if a.fng_csv:
         from btcbot.data import load_fng
         fng = load_fng(a.fng_csv)
-    res = run(df, cfg, AccountConfig(initial_jpy=a.jpy), fng)
+    acct, funding = AccountConfig(initial_jpy=a.jpy), None
+    if a.hl_funding:
+        from btcbot.hyperliquid import account_config, load_funding
+        acct, funding = account_config(), load_funding(a.hl_funding)
+    res = run(df, cfg, acct, fng, funding)
     print(format_stats(res.stats))
     if a.trades_out:
         res.trades.to_csv(a.trades_out, index=False)

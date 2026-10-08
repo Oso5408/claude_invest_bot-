@@ -105,6 +105,19 @@ class RiskController(BayesKelly):
         return float(min(max(f, 0.0), risk.MAX_LEVERAGE))
 
 
+def rollover_counts(index: pd.DatetimeIndex, hour_jst: int) -> np.ndarray:
+    """How many hour_jst:00 JST moments fall in (previous bar open, this bar open].
+
+    For 1h bars this is 1 on the bar that opens at hour_jst and 0 elsewhere. For 4h bars
+    (which open at 01, 05, 09 ... JST) the 06:00 rollover lands on the 09:00 bar, and for
+    15m bars it is counted once, not once per bar in that hour."""
+    local = (index.tz_convert("Asia/Tokyo") - pd.Timedelta(hours=hour_jst)).tz_localize(None)
+    day = ((local - pd.Timestamp("1970-01-01")) // pd.Timedelta(days=1)).to_numpy(dtype=np.int64)
+    n = np.zeros(len(index), dtype=int)
+    n[1:] = np.diff(day)
+    return n
+
+
 @dataclass
 class MarginAccount:
     collateral: float
@@ -181,7 +194,7 @@ def run(df: pd.DataFrame, cfg: MeanRevConfig | None = None, acct_cfg: AccountCon
     f = compute_features(df, cfg)
     o, h, l, c = (f[k].to_numpy() for k in ("open", "high", "low", "close"))
     z, vol_ok = f["z"].to_numpy(), f["vol_ok"].to_numpy()
-    jst_hour = f.index.tz_convert("Asia/Tokyo").hour
+    n_roll = rollover_counts(f.index, acct_cfg.rollover_hour_jst)
 
     long_ok, short_ok = f["long_ok"].to_numpy(), f["short_ok"].to_numpy()
     kelly = RiskController(StrategyConfig(prior_alpha=cfg.prior_alpha, prior_beta=cfg.prior_beta,
@@ -223,10 +236,10 @@ def run(df: pd.DataFrame, cfg: MeanRevConfig | None = None, acct_cfg: AccountCon
                     sig_qty = acct.qty
 
         # 2. leverage fee for anything held through the 06:00 JST rollover
-        if side and jst_hour[t] == acct_cfg.rollover_hour_jst:
-            sig_days += 1
+        if side and n_roll[t]:
+            sig_days += n_roll[t]
             if acct.qty:
-                acct.charge(acct_cfg.leverage_fee_per_day * abs(acct.qty) * o[t])
+                acct.charge(n_roll[t] * acct_cfg.leverage_fee_per_day * abs(acct.qty) * o[t])
 
         # 3. intrabar loss cut at 75% maintenance ratio
         if acct.qty:
