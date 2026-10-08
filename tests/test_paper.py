@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -110,3 +111,72 @@ def test_paper_fng_filter_blocks_shorts_in_greed(tmp_path):
     assert -1 in _sides(tmp_path / "fear", FngFeed(m, 20.0), cfg)
     assert -1 not in _sides(tmp_path / "greed", FngFeed(m, 80.0), cfg)
     assert -1 not in _sides(tmp_path / "down", FngFeed(m, 20.0, fail=True), cfg)  # unknown -> no shorts
+
+
+class FakeAdvisor:
+    def __init__(self, action, multiplier):
+        from btcbot.advisor import Decision
+        self.d = Decision(action, "test", multiplier)
+        self.calls = []
+
+    def decide(self, ctx):
+        self.calls.append(ctx)
+        return self.d
+
+
+def _run_with(tmp_path, advisor):
+    m = _minutes()
+    feed = FngFeed(m, 20.0)
+    cfg = PaperConfig(history_days=6, allow_short=False)
+    out = []
+    for t in pd.date_range(m.index[0] + pd.Timedelta(days=3), m.index[-1], freq="30min"):
+        out.append(PaperTrader(tmp_path, cfg, advisor=advisor).step(feed, t.to_pydatetime()))
+    return out
+
+
+def test_claude_skip_blocks_entry_and_is_logged(tmp_path):
+    adv = FakeAdvisor("skip", 0.0)
+    out = _run_with(tmp_path, adv)
+    assert adv.calls and "rules_leverage" in adv.calls[0] and "fear_greed_last_7_days" in adv.calls[0]
+    assert not (tmp_path / "trades.csv").exists()
+    assert all(o["qty"] == 0 for o in out)
+    log = pd.read_csv(tmp_path / "claude.csv")
+    assert (log["action"] == "skip").all()
+
+
+def test_claude_half_and_never_more_than_rules(tmp_path):
+    full = _run_with(tmp_path / "full", FakeAdvisor("go", 1.0))
+    half = _run_with(tmp_path / "half", FakeAdvisor("half", 0.5))
+    big = _run_with(tmp_path / "big", FakeAdvisor("go", 5.0))  # a bad multiplier is clipped to 1
+    q = lambda out: max(abs(o["qty"]) for o in out)
+    assert 0 < q(half) < q(full) and q(big) == q(full)
+
+
+def test_advisor_error_follows_rules():
+    from btcbot.advisor import ClaudeAdvisor
+
+    class Boom:
+        class beta:
+            class messages:
+                @staticmethod
+                def create(**kw):
+                    raise ConnectionError("no network")
+
+    d = ClaudeAdvisor(client=Boom()).decide({"x": 1})
+    assert d.action == "go" and d.multiplier == 1.0 and "ConnectionError" in d.error
+
+
+def test_daily_review_reads_every_account(tmp_path):
+    from btcbot.advisor import daily_review
+    _run_with(tmp_path / "paper-claude", FakeAdvisor("go", 1.0))
+    _run_with(tmp_path / "paper-rules", None)
+
+    class Reviewer:
+        def review(self, summary):
+            self.summary = summary
+            return "ok"
+
+    r = Reviewer()
+    out = daily_review(tmp_path, r, now=datetime(2026, 9, 10, tzinfo=timezone.utc))
+    assert out.read_text() == "ok"
+    assert "## paper-claude" in r.summary and "## paper-rules" in r.summary and "Claude entry decisions" in r.summary

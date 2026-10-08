@@ -102,7 +102,50 @@ cd ~/claude_invest_bot- && git pull
 
 模擬帳戶嘅紀錄放喺 `data/paper-*` 入面，`git pull` 唔會刪走佢哋。
 
-## 9. 停止
+## 9. 加 Claude 帳戶同每日檢討（可選）
+
+第四個帳戶同 `paper-2x-fng` 一模一樣，唯一分別係每次想開倉之前會先問 Claude。Claude 會睇最近 30 支 4 小時 K 線、恐懼與貪婪指數、最近 5 單交易，亦可以上網搜新聞，然後答：
+
+- `go`：照規則開倉
+- `half`：開一半
+- `skip`：唔開
+
+Claude 只可以減細或者取消，唔可以自己開倉，亦唔可以加大注碼，2 倍上限照樣鎖死。每次決定連埋原因都會記喺 `claude.csv`。如果連唔到 Claude，就照規則做，並喺 `claude.csv` 記低錯誤。
+
+每日檢討：每朝 Claude 會睇晒所有帳戶，寫一份繁體中文總結放喺 `data/reviews/日期.md`，唔會郁任何單。
+
+**1. 攞 API key：** 去 https://console.anthropic.com ，註冊並入錢（最少 5 美元），喺 **API Keys** 撳 **Create Key**。記住喺 **Limits** 設定每月上限，例如 10 美元。
+
+**2. 將 key 存喺部機：** 喺 SSH 視窗打（將 `sk-ant-...` 換成你嘅 key）：
+
+```bash
+echo 'export ANTHROPIC_API_KEY=sk-ant-...' > ~/.anthropic_env
+chmod 600 ~/.anthropic_env
+```
+
+個 key 唔好貼去其他地方，亦唔好放入 git。
+
+**3. 安裝新套件：**
+
+```bash
+cd ~/claude_invest_bot- && git pull && .venv/bin/pip install -r requirements.txt
+```
+
+**4. 喺 crontab 加兩行**（`crontab -e`，加喺最尾）：
+
+```
+*/5 * * * * . $HOME/.anthropic_env; cd $HOME/claude_invest_bot- && .venv/bin/python -m btcbot.paper step --folder data/paper-2x-fng-claude --fng-short-max 50 --claude >> data/paper-2x-fng-claude.log 2>&1
+30 0 * * * . $HOME/.anthropic_env; cd $HOME/claude_invest_bot- && .venv/bin/python -m btcbot.advisor review >> data/review.log 2>&1
+```
+
+第二行每日 UTC 00:30（日本時間 09:30）寫檢討。睇檢討：
+
+```bash
+cat ~/claude_invest_bot-/data/reviews/$(date +%F).md
+cat ~/claude_invest_bot-/data/paper-2x-fng-claude/claude.csv    # Claude 每次嘅決定同原因
+```
+
+## 10. 停止
 
 - **暫停：** 打 `crontab -e`，喺嗰兩行前面加 `#`。
 - **完全唔用：** 喺 VM instances 撳 **Stop** 或者 **Delete**。停咗機就唔會再收機器嘅錢，但係硬碟仍然會收少少錢，delete 咗就全部唔收。

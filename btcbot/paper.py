@@ -25,6 +25,7 @@ import pandas as pd
 import requests
 
 from btcbot import risk
+from btcbot.advisor import entry_context
 from btcbot.breakout import BreakoutConfig, compute_features
 from btcbot.data import BASE_URL, FNG_URL, parse_fng, parse_klines, resample
 from btcbot.meanrev import AccountConfig, MarginAccount, RiskController, _round_qty
@@ -91,13 +92,14 @@ class GMOFeed:
 
 class PaperTrader:
     def __init__(self, folder: Path, cfg: PaperConfig | None = None, acct_cfg: AccountConfig | None = None,
-                 strat: BreakoutConfig | None = None):
+                 strat: BreakoutConfig | None = None, advisor=None):
         self.folder = Path(folder)
         self.folder.mkdir(parents=True, exist_ok=True)
         self.cfg = cfg or PaperConfig()
         self.acct_cfg = acct_cfg or AccountConfig(initial_jpy=self.cfg.initial_jpy)
         self.strat = strat or BreakoutConfig(allow_short=self.cfg.allow_short, max_leverage=self.cfg.max_leverage,
                                              fng_short_max=self.cfg.fng_short_max)
+        self.advisor = advisor  # optional ClaudeAdvisor: may halve or cancel a new entry, never enlarge it
         self.state_path = self.folder / "state.json"
         self.state = self._load()
 
@@ -207,7 +209,7 @@ class PaperTrader:
         fng_now = None
         if len(bars):
             fng = None
-            if self.strat.fng_short_max < 100:
+            if self.strat.fng_short_max < 100 or self.advisor is not None:
                 try:
                     fng = feed.fng()
                 except Exception as e:  # no index -> no shorts this time, never a guess
@@ -216,7 +218,7 @@ class PaperTrader:
             f = compute_features(bars, self.strat, fng)
             if fng is not None:
                 fng_now = None if f["fng"].isna().iloc[-1] else float(f["fng"].iloc[-1])
-                if fng_now is None:
+                if fng_now is None and self.strat.fng_short_max < 100:
                     f.loc[f.index[-1], "short_signal"] = False
             last = f.index[-1]
             if s["last_bar"] is None:
@@ -235,11 +237,26 @@ class PaperTrader:
                     px = ask if direction > 0 else bid
                     lev = min(rc.leverage(), self.strat.max_leverage, risk.MAX_LEVERAGE)
                     eq = acct.equity(px)
+                    note = ""
+                    if self.advisor is not None:
+                        ctx = entry_context(bars, row, direction, lev, px, eq, fng, self.folder / "trades.csv")
+                        d = self.advisor.decide(ctx)
+                        lev *= min(max(d.multiplier, 0.0), 1.0)  # shrink or cancel only
+                        self._append("claude.csv", {"time": str(now), "signal": "long" if direction > 0 else "short",
+                                                    "price": px, "rules_leverage": ctx["rules_leverage"],
+                                                    "action": d.action, "leverage": round(lev, 3),
+                                                    "reason": d.reason, "error": d.error or ""})
+                        note = f" (Claude: {d.action})"
                     target = risk.cap_quantity(direction * lev * eq / px, px, eq, self.acct_cfg.fee_rate)
-                    acct.set_position(_round_qty(target, self.acct_cfg), px, self.acct_cfg.fee_rate)
-                    s.update(side=direction, sig_entry=px, entry_time=str(now), sig_days=0, best=px,
-                             stop=px - direction * self.strat.atr_mult * row["atr"], entry_qty=acct.qty)
-                    action = f"{'long' if direction > 0 else 'short'} {acct.qty:+.0f} @ {px:.3f}, stop {s['stop']:.3f}"
+                    qty = _round_qty(target, self.acct_cfg)
+                    if qty == 0:
+                        action = f"{'long' if direction > 0 else 'short'} signal skipped{note}"
+                    else:
+                        acct.set_position(qty, px, self.acct_cfg.fee_rate)
+                        s.update(side=direction, sig_entry=px, entry_time=str(now), sig_days=0, best=px,
+                                 stop=px - direction * self.strat.atr_mult * row["atr"], entry_qty=acct.qty)
+                        action = (f"{'long' if direction > 0 else 'short'} {acct.qty:+.0f} @ {px:.3f}, "
+                                  f"stop {s['stop']:.3f}{note}")
             s["last_bar"] = str(last)
 
         mark = float(hourly["close"].iloc[-1]) if len(hourly) else s["entry"]
@@ -266,11 +283,17 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--jpy", type=float, default=PaperConfig.initial_jpy)
     p.add_argument("--fng-short-max", type=float, default=PaperConfig.fng_short_max,
                    help="only short when the Fear & Greed Index is at or below this, e.g. 50")
+    p.add_argument("--claude", action="store_true",
+                   help="ask Claude before each entry (go / half / skip); needs ANTHROPIC_API_KEY")
     a = p.parse_args(argv)
 
     cfg = PaperConfig(symbol=a.symbol, allow_short=not a.no_short, max_leverage=a.max_leverage, initial_jpy=a.jpy,
                       fng_short_max=a.fng_short_max)
-    trader = PaperTrader(Path(a.folder), cfg)
+    advisor = None
+    if a.claude and a.command == "step":
+        from btcbot.advisor import ClaudeAdvisor
+        advisor = ClaudeAdvisor()
+    trader = PaperTrader(Path(a.folder), cfg, advisor=advisor)
     if a.command == "status":
         s = trader.state
         print(json.dumps({k: s[k] for k in ("collateral", "qty", "entry", "side", "stop", "last_check", "last_bar",
