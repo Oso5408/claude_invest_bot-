@@ -180,9 +180,12 @@ def daily_review(data_dir: Path, advisor: ClaudeAdvisor, now: datetime | None = 
     now = now or datetime.now(timezone.utc)
     since = pd.Timestamp(now) - pd.Timedelta(days=1)
     folders = sorted(p for p in data_dir.glob("paper-*") if p.is_dir())
-    summary = (f"Review time: {now:%Y-%m-%d %H:%M} UTC.\nBacktest reference (2024-05 to 2026-10, 30,000 JPY start): "
-               "4h breakout 2x both sides +151%, max drawdown -42%; with shorts only when Fear & Greed <= 50: "
-               "+886%, max drawdown -48%; 1x long only +187%, max drawdown -27%.\n\n"
+    summary = (f"Review time: {now:%Y-%m-%d %H:%M} UTC.\nBacktest reference, GMO (2024-05 to 2026-10, 30,000 JPY start): "
+               "4h breakout 2x both sides +100%, max drawdown -42%; with shorts only when Fear & Greed <= 50: "
+               "+682%, max drawdown -48%; 1x long only +175%, max drawdown -27%. "
+               "Hyperliquid (2024-06 to 2026-10, 200 USD start): 2x both sides +353%, max drawdown -47%; "
+               "with the Fear & Greed short filter +1,029%, max drawdown -41%; 1x long only +206%, max drawdown -30%; "
+               "the second half of that period was roughly flat.\n\n"
                + "\n\n".join(account_summary(f, since) for f in folders))
     out = data_dir / "reviews" / f"{now:%Y-%m-%d}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
