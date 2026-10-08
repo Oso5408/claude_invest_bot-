@@ -84,3 +84,27 @@ def test_resample_to_4h():
     assert len(r) == 2
     assert r["open"].iloc[0] == df["open"].iloc[0] and r["close"].iloc[0] == df["close"].iloc[3]
     assert r["high"].iloc[1] == df["high"].iloc[4:].max() and r["volume"].iloc[0] == 4
+
+
+def test_mtf_trend_and_volume_filters():
+    from btcbot.breakout import mtf_config
+    n = 24 * 60
+    idx = pd.date_range("2024-06-01", periods=n, freq="h", tz="UTC", name="open_time")
+    close = np.full(n, 100.0)
+    close[: n - 2] = np.linspace(200, 100, n - 2)  # long downtrend: price under the 4h EMA50
+    close[-2], close[-1] = 100.0, 104.0  # then one big up break with volume
+    vol = np.full(n, 1000.0)
+    vol[-1] = 5000
+    df = _bars(close, vol)
+    f = compute_features(df, mtf_config())
+    assert not f["long_signal"].iloc[-1]  # blocked: below the trend EMA
+    g = compute_features(df, mtf_config(trend_timeframe=None))
+    assert g["long_signal"].iloc[-1]
+    # a short break without volume is ignored in the MTF preset
+    close2 = close.copy()
+    close2[-1] = 90.0
+    vol2 = np.full(n, 1000.0)
+    h = compute_features(_bars(close2, vol2), mtf_config())
+    assert not h["short_signal"].iloc[-1]
+    vol2[-1] = 5000
+    assert compute_features(_bars(close2, vol2), mtf_config())["short_signal"].iloc[-1]

@@ -91,6 +91,30 @@ python -m btcbot.breakout --csv data/ADA_JPY_1hour.csv --no-short       # 只做
 | 注碼 | RiskController 預設勝率 35%、盈虧比 2.5、平均虧損 2%（當做已經有 30 單），第一單起用四分一 Kelly（約 1.1 倍），之後按真實交易更新 |
 | 風控 | 同均值回歸一樣：2 倍上限、手續費、槓桿費、75% 斬倉 |
 
+## 中性網格（`btcbot/grid.py`）
+
+```bash
+python -m btcbot.grid --csv data/ADA_JPY_1hour.csv
+python -m btcbot.grid --csv data/ADA_JPY_1hour.csv --levels 20 --spacing 0.02
+```
+
+- 以建網格嗰陣嘅價格做中心，上下各 10 條線，每條相隔 1%（即 ±10%）。
+- 價格每跌穿一條線就加一份多單（或者平一份空單），每升穿一條線就加一份空單（或者平一份多單）。
+- 每份大小：價格去到區間邊位嗰陣，總倉位啱啱係 2 倍槓桿。
+- 價格走出區間：全部即市平倉，再用新價格做中心重新起網格。
+- 網格單係限價單，用 maker 手續費（ADA_JPY 係 0%）；走出區間平倉用 taker 手續費加滑價。
+
+## 多時間框架帶量突破（`btcbot/breakout.py --mtf`）
+
+```bash
+python -m btcbot.data --symbol ADA_JPY --interval 15min --start 2024-05-25
+python -m btcbot.breakout --csv data/ADA_JPY_15min.csv --mtf
+```
+
+- 大趨勢：4 小時 K 線 EMA50，價格喺上面只准做多，喺下面只准做空。
+- 入市：15 分鐘 K 線收市突破之前 20 條最高價（做多）或者跌穿之前 20 條最低價（做空），而且成交量大過之前 20 條平均嘅 1.5 倍。
+- 平倉同注碼：同策略 B 一樣（2 × ATR 移動止損，RiskController 預設勝率 35%、盈虧比 2.5）。
+
 ## 測試
 
 ```bash

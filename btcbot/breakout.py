@@ -25,7 +25,7 @@ import pandas as pd
 
 from btcbot import risk
 from btcbot.data import load_csv, resample
-from btcbot.meanrev import AccountConfig, MarginAccount, Result, RiskController, _round_qty, _stats
+from btcbot.meanrev import AccountConfig, MarginAccount, Result, RiskController, _round_qty, _stats, htf_ema
 from btcbot.strategy import StrategyConfig
 
 
@@ -38,6 +38,9 @@ class BreakoutConfig:
     atr_period: int = 14
     atr_mult: float = 2.0
     allow_short: bool = True
+    short_needs_volume: bool = False
+    trend_timeframe: str | None = None  # e.g. "4h": longs only above its EMA, shorts only below
+    trend_ema: int = 50
     kelly_fraction: float = 0.25
     prior_win_rate: float = 0.35
     prior_payoff: float = 2.5
@@ -54,9 +57,25 @@ def compute_features(df: pd.DataFrame, cfg: BreakoutConfig) -> pd.DataFrame:
     out["donchian_high"] = out["high"].shift().rolling(cfg.long_lookback).max()
     out["donchian_low"] = out["low"].shift().rolling(cfg.short_lookback).min()
     out["volume_ma"] = out["volume"].shift().rolling(cfg.volume_lookback).mean()
-    out["long_signal"] = (out["close"] > out["donchian_high"]) & (out["volume"] > cfg.volume_mult * out["volume_ma"])
+    loud = out["volume"] > cfg.volume_mult * out["volume_ma"]
+    out["long_signal"] = (out["close"] > out["donchian_high"]) & loud
     out["short_signal"] = (out["close"] < out["donchian_low"]) & cfg.allow_short
+    if cfg.short_needs_volume:
+        out["short_signal"] &= loud
+    if cfg.trend_timeframe:
+        out["trend_ema"] = htf_ema(out, cfg.trend_timeframe, cfg.trend_ema)
+        out["long_signal"] &= out["close"] > out["trend_ema"]
+        out["short_signal"] &= out["close"] < out["trend_ema"]
     return out
+
+
+def mtf_config(**overrides) -> BreakoutConfig:
+    """Multi-timeframe volume breakout: 4h EMA50 sets the side, 15m 20-bar breakout
+    with volume above 1.5x its 20-bar average triggers, 2 x ATR trailing stop exits."""
+    base = dict(long_lookback=20, short_lookback=20, volume_lookback=20, volume_mult=1.5,
+                short_needs_volume=True, trend_timeframe="4h", trend_ema=50)
+    base.update(overrides)
+    return BreakoutConfig(**base)
 
 
 def run(df: pd.DataFrame, cfg: BreakoutConfig | None = None, acct_cfg: AccountConfig | None = None) -> Result:
@@ -158,6 +177,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--jpy", type=float, default=AccountConfig.initial_jpy)
     p.add_argument("--no-short", action="store_true")
     p.add_argument("--timeframe", default=None, help="resample the CSV first, e.g. 4h")
+    p.add_argument("--mtf", action="store_true", help="multi-timeframe preset: 4h EMA50 + 1.5x volume breakout both ways")
     p.add_argument("--trades-out")
     a = p.parse_args(argv)
 
@@ -168,7 +188,8 @@ def main(argv: list[str] | None = None) -> None:
         df = random_walk(start_price=100, vol=0.01, drift=0.0003)
     if a.timeframe:
         df = resample(df, a.timeframe)
-    res = run(df, BreakoutConfig(allow_short=not a.no_short), AccountConfig(initial_jpy=a.jpy))
+    cfg = mtf_config(allow_short=not a.no_short) if a.mtf else BreakoutConfig(allow_short=not a.no_short)
+    res = run(df, cfg, AccountConfig(initial_jpy=a.jpy))
     print(format_stats(res.stats))
     if a.trades_out:
         res.trades.to_csv(a.trades_out, index=False)

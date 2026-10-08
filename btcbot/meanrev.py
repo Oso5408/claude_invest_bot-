@@ -138,6 +138,20 @@ class Result:
     stats: dict = field(default_factory=dict)
 
 
+def htf_ema(df: pd.DataFrame, timeframe: str, span: int) -> np.ndarray:
+    """EMA of a higher timeframe's closes, aligned to each bar of df.
+
+    Only completed higher-timeframe bars count: a 4h bar's EMA is usable from the
+    close of the last df bar inside it, never earlier.
+    """
+    tf = pd.Timedelta(timeframe)
+    htf_close = df["close"].resample(tf, label="left", closed="left").last().dropna()
+    ema = htf_close.ewm(span=span, adjust=False, min_periods=span).mean()
+    ema.index = ema.index + tf
+    step = df.index.to_series().diff().min() if len(df) > 1 else pd.Timedelta(hours=1)
+    return ema.reindex(df.index + step, method="ffill").to_numpy()
+
+
 def compute_features(df: pd.DataFrame, cfg: MeanRevConfig) -> pd.DataFrame:
     out = df.copy()
     mean = out["close"].rolling(cfg.window).mean()
@@ -147,14 +161,7 @@ def compute_features(df: pd.DataFrame, cfg: MeanRevConfig) -> pd.DataFrame:
     vol_pct = vol.rolling(cfg.vol_rank_window, min_periods=cfg.vol_window * 2).rank(pct=True)
     out["vol_ok"] = vol_pct <= cfg.vol_max_pct
     if cfg.trend_filter:
-        # EMA on completed higher-timeframe bars only: a 4h bar's EMA is usable from its close on.
-        tf = pd.Timedelta(cfg.trend_timeframe)
-        htf_close = out["close"].resample(tf, label="left", closed="left").last().dropna()
-        ema = htf_close.ewm(span=cfg.trend_ema, adjust=False, min_periods=cfg.trend_ema).mean()
-        ema.index = ema.index + tf
-        step = out.index.to_series().diff().min() if len(out) > 1 else pd.Timedelta(hours=1)
-        bar_close = out.index + step
-        out["trend_ema"] = ema.reindex(bar_close, method="ffill").to_numpy()
+        out["trend_ema"] = htf_ema(out, cfg.trend_timeframe, cfg.trend_ema)
         out["long_ok"] = out["close"] > out["trend_ema"]
         out["short_ok"] = out["close"] < out["trend_ema"]
     else:
