@@ -118,7 +118,7 @@ def summarize(eq: pd.Series, trades: pd.DataFrame, df: pd.DataFrame, bt: Backtes
 
 
 def format_stats(s: dict) -> str:
-    pct = {"total_return", "cagr", "max_drawdown", "win_rate_taken", "buy_and_hold_return", "buy_and_hold_max_drawdown"}
+    pct = {"total_return", "cagr", "max_drawdown", "win_rate_taken", "win_rate", "buy_and_hold_return", "buy_and_hold_max_drawdown"}
     lines = []
     for k, v in s.items():
         lines.append(f"{k:28s} {v:.2%}" if k in pct else f"{k:28s} {v:,.2f}" if isinstance(v, float) else f"{k:28s} {v:,}" if isinstance(v, int) else f"{k:28s} {v}")

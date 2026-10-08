@@ -78,14 +78,33 @@ def load_csv(path: str | Path) -> pd.DataFrame:
     return df
 
 
+def fetch_rules(symbol: str) -> dict:
+    """Order rules (minOrderSize, sizeStep, tickSize, fees) for one symbol."""
+    resp = requests.get("https://api.coin.z.com/public/v1/symbols", timeout=15)
+    resp.raise_for_status()
+    payload = resp.json()
+    if payload.get("status") != 0:
+        raise RuntimeError(f"GMO API error: {payload.get('messages')}")
+    for rule in payload["data"]:
+        if rule["symbol"] == symbol:
+            return rule
+    raise ValueError(f"{symbol} not listed by GMO Coin")
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description="Download GMO Coin klines to CSV")
-    p.add_argument("--symbol", default="BTC", help="BTC = spot (priced in JPY), BTC_JPY = leverage")
+    p.add_argument("--symbol", default="BTC", help="BTC, ADA = spot (priced in JPY); BTC_JPY, ADA_JPY = leverage")
     p.add_argument("--interval", default="1hour")
-    p.add_argument("--start", required=True, help="YYYY-MM-DD")
+    p.add_argument("--start", help="YYYY-MM-DD (ADA_JPY leverage trading began 2024-05-25)")
+    p.add_argument("--rules", action="store_true", help="print the symbol's order rules and exit")
     p.add_argument("--end", default=None, help="YYYY-MM-DD, default yesterday (UTC)")
     p.add_argument("--out", default=None, help="CSV path, default data/<symbol>_<interval>.csv")
     args = p.parse_args(argv)
+    if args.rules:
+        print(fetch_rules(args.symbol))
+        return
+    if not args.start:
+        p.error("--start is required")
 
     start = date.fromisoformat(args.start)
     end = date.fromisoformat(args.end) if args.end else datetime.now(timezone.utc).date() - timedelta(days=1)

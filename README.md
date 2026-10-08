@@ -50,6 +50,31 @@ python -m btcbot.backtest --synthetic                                   # 用隨
 
 報告包括：總回報、年化回報、最大回撤、Sharpe、已付手續費、交易次數、勝率，同埋直接持有 BTC 嘅回報同回撤做比較。
 
+## ADA 2 倍槓桿均值回歸（`btcbot/meanrev.py`）
+
+用 GMO Coin 暗號資產 FX（槓桿）嘅 ADA/JPY，本金預設 30,000 日圓（大約 200 美元）。只係回測，唔會落真單。
+
+```bash
+# 1. 睇 ADA_JPY 嘅落單規則（最少落單量、單位）
+python -m btcbot.data --symbol ADA_JPY --rules
+# 2. 下載數據（ADA/JPY 槓桿 2024 年 5 月 25 日先開始）
+python -m btcbot.data --symbol ADA_JPY --start 2024-05-25
+# 3. 回測
+python -m btcbot.meanrev --csv data/ADA_JPY_1hour.csv
+python -m btcbot.meanrev --csv data/ADA_JPY_1hour.csv --min-order 10   # 換成第 1 步見到嘅 minOrderSize
+```
+
+| 部分 | 做咩 |
+|---|---|
+| 訊號 | 價格偏離 48 小時平均超過 2 個標準差就反向入市（跌得太多買、升得太多沽） |
+| 平倉 | 回到平均、偏離超過 4 個標準差（止蝕）、或者揸咗 72 小時 |
+| 波動率過濾 | 波動率喺最高 10% 嗰陣唔開新倉 |
+| 注碼 | 四分一 Kelly：f* = (p − (1 − p) / b) / 平均虧損。未有 10 單紀錄之前唔落注 |
+| 2 倍上限 | `btcbot/risk.py` 入面寫死 `MAX_LEVERAGE = 2.0`。每張單都會被截到 2 倍以內，帳戶喺每次成交再檢查，超過就直接報錯停低 |
+| 槓桿費 | 每日 06:00 仍然持倉，收倉位價值 0.04% |
+| 斬倉 | 保證金維持率跌到 75% 即時斬倉 |
+| 交易費 | GMO 槓桿交易免手續費，但每次成交計 0.05% 滑價 |
+
 ## 測試
 
 ```bash
