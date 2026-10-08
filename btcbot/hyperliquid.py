@@ -98,10 +98,10 @@ def account_config(initial_usd: float = 200.0):
 
 
 def load_funding(path: str | Path) -> pd.Series:
-    s = pd.read_csv(path, parse_dates=["time"], index_col="time")["funding"]
-    if s.index.tz is None:
-        s.index = s.index.tz_localize("UTC")
-    return s
+    raw = pd.read_csv(path)
+    idx = pd.to_datetime(raw["time"], utc=True, format="ISO8601")  # some stamps carry milliseconds, some don't
+    return pd.Series(raw["funding"].to_numpy(dtype=float), index=pd.DatetimeIndex(idx, name="time"),
+                     name="funding").sort_index()
 
 
 def main(argv: list[str] | None = None) -> None:

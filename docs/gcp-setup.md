@@ -145,7 +145,24 @@ cat ~/claude_invest_bot-/data/reviews/$(date +%F).md
 cat ~/claude_invest_bot-/data/paper-2x-fng-claude/claude.csv    # Claude 每次嘅決定同原因
 ```
 
-## 10. 停止
+## 10. Hyperliquid 模擬帳戶
+
+用 Hyperliquid 嘅 ADA 永續合約價格（美元）做模擬，本金 200 美元，手續費 0.045%，每小時資金費率照真實數字計。唔使帳戶，亦唔使 key。
+
+```bash
+cd ~/claude_invest_bot- && git pull
+```
+
+再喺 crontab 加（`crontab -e`，加喺最尾）：
+
+```
+*/5 * * * * cd $HOME/claude_invest_bot- && .venv/bin/python -m btcbot.paper step --venue hl --folder data/paper-hl-2x-fng --fng-short-max 50 >> data/paper-hl-2x-fng.log 2>&1
+*/5 * * * * cd $HOME/claude_invest_bot- && .venv/bin/python -m btcbot.paper step --venue hl --folder data/paper-hl-1x-long --no-short --max-leverage 1 >> data/paper-hl-1x-long.log 2>&1
+```
+
+睇結果：`.venv/bin/python -m btcbot.paper status --venue hl --folder data/paper-hl-2x-fng`
+
+## 11. 停止
 
 - **暫停：** 打 `crontab -e`，喺嗰兩行前面加 `#`。
 - **完全唔用：** 喺 VM instances 撳 **Stop** 或者 **Delete**。停咗機就唔會再收機器嘅錢，但係硬碟仍然會收少少錢，delete 咗就全部唔收。

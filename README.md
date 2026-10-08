@@ -137,6 +137,17 @@ python -m btcbot.paper step --folder data/paper-1x-long --no-short --max-leverag
 python -m btcbot.paper status --folder data/paper-2x
 ```
 
+## Hyperliquid（`btcbot/hyperliquid.py`）
+
+```bash
+python -m btcbot.hyperliquid --coin ADA          # data/HL_ADA_4h.csv + data/HL_ADA_funding.csv（只有最近 5000 支 K 線）
+python -m btcbot.breakout --csv data/HL_ADA_4h.csv --hl-funding data/HL_ADA_funding.csv --fng-csv data/fear_greed.csv --fng-short 0 50
+python -m btcbot.paper step --venue hl --folder data/paper-hl-2x-fng --fng-short-max 50
+```
+
+- 美元計價，本金 200 美元，taker 手續費 0.045%，每小時資金費率（正數 = 做多俾錢做空）。
+- 2 倍上限同 GMO 一樣喺 `risk.py` 鎖死。
+
 ## Claude 參與決定（`btcbot/advisor.py`）
 
 - `python -m btcbot.paper step ... --claude`：每次開倉前問 Claude（go／half／skip）。Claude 只可以減細或者取消，2 倍上限照樣鎖死；連唔到 Claude 就照規則做。決定記喺 `claude.csv`。

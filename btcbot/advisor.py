@@ -48,9 +48,10 @@ DECIDE_TOOL = {
 }
 WEB_SEARCH_TOOL = {"type": "web_search_20260209", "name": "web_search", "max_uses": 3}
 
-ENTRY_SYSTEM = """You review trades for a small paper-trading account (fake money) on GMO Coin's ADA_JPY \
-crypto FX market. A rule-based 4h Donchian breakout strategy has just produced a signal. Your job is to \
-decide whether the account should take it at full size, half size, or not at all.
+ENTRY_SYSTEM = """You review trades for a small paper-trading account (fake money) trading ADA with up to 2x \
+leverage (GMO Coin's ADA_JPY crypto FX, or the ADA perpetual on Hyperliquid in USD; the venue says which). \
+A rule-based 4h Donchian breakout strategy has just produced a signal. Your job is to decide \
+whether the account should take it at full size, half size, or not at all.
 
 Context on the strategy, from a 2.3-year backtest: it wins about 40% of trades, and its profit comes from \
 a few large trend moves caught by a trailing stop, so most skipped trades are small losers but skipping \
@@ -62,8 +63,9 @@ You may search the web for recent ADA or crypto-market news before deciding. The
 once. Do not invent prices; use the numbers you are given."""
 
 REVIEW_SYSTEM = """You write a short daily review of a paper-trading experiment (fake money) for its owner, \
-who reads Traditional Chinese (Hong Kong style). Several accounts trade ADA_JPY on GMO Coin with the same \
-4h breakout strategy and different settings, so they can be compared. Write in Traditional Chinese \
+who reads Traditional Chinese (Hong Kong style). Several accounts trade ADA with the same 4h breakout \
+strategy and different settings, so they can be compared: accounts named paper-hl-* use Hyperliquid prices \
+in USD (200 USD start), the others GMO Coin prices in JPY (30,000 JPY start). Write in Traditional Chinese \
 (Hong Kong style), plain sentences, under 300 words: how each account did since the last review and in \
 total, anything unusual (losses bigger than the stop should allow, errors, no runs for hours), and whether \
 the results so far differ from the backtest. Be honest that a few trades prove nothing. Do not recommend \
@@ -126,12 +128,12 @@ class ClaudeAdvisor:
 
 
 def entry_context(bars: pd.DataFrame, row: pd.Series, direction: int, leverage: float, price: float,
-                  equity: float, fng: pd.Series | None, trades_path: Path) -> dict:
+                  equity: float, fng: pd.Series | None, trades_path: Path, symbol: str = "ADA_JPY") -> dict:
     """What Claude sees for one signal. Only data known at the decision time."""
     recent = bars.tail(30)[["open", "high", "low", "close", "volume"]].round(4)
     recent.index = recent.index.strftime("%Y-%m-%d %H:%M UTC")
     ctx = {
-        "symbol": "ADA_JPY", "timeframe": "4h",
+        "symbol": symbol, "venue": "Hyperliquid (USD)" if symbol == "ADA" else "GMO Coin (JPY)", "timeframe": "4h",
         "signal": "long breakout" if direction > 0 else "short breakdown",
         "rule_details": {"close": row["close"], "donchian_high_20": row["donchian_high"],
                          "donchian_low_10": row["donchian_low"], "volume": row["volume"],
@@ -139,7 +141,7 @@ def entry_context(bars: pd.DataFrame, row: pd.Series, direction: int, leverage: 
                          "initial_stop": price - direction * 2 * row["atr"]},
         "entry_price_now": price,
         "rules_leverage": round(leverage, 3),
-        "account_equity_jpy": round(equity),
+        "account_equity": round(equity, 2),
         "last_30_candles_4h": recent.to_dict(orient="index"),
     }
     if fng is not None and len(fng):
@@ -158,8 +160,8 @@ def account_summary(folder: Path, since: pd.Timestamp) -> str:
         last = eq.iloc[-1]
         day = eq[eq["time"] >= since]
         start = day["equity"].iloc[0] if len(day) else last["equity"]
-        lines.append(f"runs logged: {len(eq)}, last run {last['time']}, equity now {last['equity']} JPY "
-                     f"(start 30000), 24h ago {start}, position qty {last['qty']} side {last['side']} "
+        lines.append(f"runs logged: {len(eq)}, last run {last['time']}, equity now {last['equity']}, "
+                     f"24h ago {start}, position qty {last['qty']} side {last['side']} "
                      f"stop {last['stop']}")
         errors = day[day["action"].astype(str).str.contains("unavailable|error", case=False)]
         if len(errors):

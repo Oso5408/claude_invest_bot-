@@ -90,6 +90,35 @@ class GMOFeed:
         return parse_fng(resp.json())
 
 
+class HyperliquidFeed(GMOFeed):
+    """Hyperliquid perp prices (USD) and hourly funding, mainnet public data. No account needed."""
+
+    has_funding = True
+    INTERVALS = {"1min": "1m", "1hour": "1h"}
+
+    def __init__(self, coin: str = "ADA", url: str | None = None):
+        from btcbot import hyperliquid as hl
+        self.hl = hl
+        self.symbol = coin
+        self.url = url or hl.MAINNET
+        self.session = requests.Session()
+
+    def candles(self, interval: str, now: datetime, days: int) -> pd.DataFrame:
+        end = int(now.timestamp() * 1000)
+        start = end - (days + 1) * 86_400_000
+        rows = self.hl._post(self.url, {"type": "candleSnapshot", "req": {
+            "coin": self.symbol, "interval": self.INTERVALS[interval], "startTime": start, "endTime": end}}, self.session)
+        return self.hl.parse_candles(rows)
+
+    def bid_ask(self) -> tuple[float, float]:
+        book = self.hl._post(self.url, {"type": "l2Book", "coin": self.symbol}, self.session)
+        bids, asks = book["levels"]
+        return float(bids[0]["px"]), float(asks[0]["px"])
+
+    def funding(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.Series:
+        return self.hl.fetch_funding(self.symbol, int(start.timestamp() * 1000), int(end.timestamp() * 1000), self.url)
+
+
 class PaperTrader:
     def __init__(self, folder: Path, cfg: PaperConfig | None = None, acct_cfg: AccountConfig | None = None,
                  strat: BreakoutConfig | None = None, advisor=None):
@@ -162,26 +191,36 @@ class PaperTrader:
         s = self.state
         side = s["side"]
         acct.set_position(0.0, px, self.acct_cfg.fee_rate)
-        ret = side * (px / s["sig_entry"] - 1) - self.acct_cfg.leverage_fee_per_day * s["sig_days"] - 2 * self.acct_cfg.fee_rate
+        carry = s.get("sig_funding", 0.0) + self.acct_cfg.leverage_fee_per_day * s["sig_days"]
+        ret = side * (px / s["sig_entry"] - 1) - carry - 2 * self.acct_cfg.fee_rate
         rc.update(ret)
         self._append("trades.csv", {"entry_time": s["entry_time"], "exit_time": str(when), "side": side,
                                     "entry_px": s["sig_entry"], "exit_px": px, "qty": s["entry_qty"], "return": ret,
                                     "reason": reason, "equity_after": acct.equity(px)})
-        s.update(side=0, stop=0.0, best=0.0, sig_days=0, entry_time=None)
+        s.update(side=0, stop=0.0, best=0.0, sig_days=0, sig_funding=0.0, entry_time=None)
 
     def step(self, feed, now: datetime | None = None) -> dict:
         now = now or datetime.now(timezone.utc)
         s, acct, rc = self.state, self._account(), self._rc()
         last_check = pd.Timestamp(s["last_check"]) if s["last_check"] else None
 
-        # 1. leverage fee for each 06:00 JST passed, then stop / loss cut on every minute since the last run
-        if s["side"] and last_check is not None:
+        # 1. carrying cost since the last run (GMO: fee per 06:00 JST passed; Hyperliquid: hourly funding),
+        #    then stop / loss cut on every minute since the last run
+        if s["side"] and last_check is not None and getattr(feed, "has_funding", False):
+            rates = feed.funding(last_check, pd.Timestamp(now))
+            rates = rates[(rates.index > last_check) & (rates.index <= pd.Timestamp(now))]
+            if len(rates) and acct.qty:
+                bid, ask = feed.bid_ask()
+                acct.charge(float(rates.sum()) * acct.qty * (bid + ask) / 2)  # positive rate: longs pay
+                s["sig_funding"] = s.get("sig_funding", 0.0) + s["side"] * float(rates.sum())
+        elif s["side"] and last_check is not None:
             n = rollovers_between(last_check, pd.Timestamp(now), self.acct_cfg.rollover_hour_jst)
             if n:
                 s["sig_days"] += n
                 if acct.qty:
                     bid, ask = feed.bid_ask()
                     acct.charge(n * self.acct_cfg.leverage_fee_per_day * abs(acct.qty) * (bid + ask) / 2)
+        if s["side"] and last_check is not None:
             days = min(3, (pd.Timestamp(now) - last_check).days + 1)
             minutes = feed.candles("1min", now, days)
             minutes = minutes[minutes.index >= last_check.floor("min")]
@@ -239,7 +278,8 @@ class PaperTrader:
                     eq = acct.equity(px)
                     note = ""
                     if self.advisor is not None:
-                        ctx = entry_context(bars, row, direction, lev, px, eq, fng, self.folder / "trades.csv")
+                        ctx = entry_context(bars, row, direction, lev, px, eq, fng, self.folder / "trades.csv",
+                                            symbol=self.cfg.symbol)
                         d = self.advisor.decide(ctx)
                         lev *= min(max(d.multiplier, 0.0), 1.0)  # shrink or cancel only
                         self._append("claude.csv", {"time": str(now), "signal": "long" if direction > 0 else "short",
@@ -253,10 +293,10 @@ class PaperTrader:
                         action = f"{'long' if direction > 0 else 'short'} signal skipped{note}"
                     else:
                         acct.set_position(qty, px, self.acct_cfg.fee_rate)
-                        s.update(side=direction, sig_entry=px, entry_time=str(now), sig_days=0, best=px,
+                        s.update(side=direction, sig_entry=px, entry_time=str(now), sig_days=0, sig_funding=0.0, best=px,
                                  stop=px - direction * self.strat.atr_mult * row["atr"], entry_qty=acct.qty)
-                        action = (f"{'long' if direction > 0 else 'short'} {acct.qty:+.0f} @ {px:.3f}, "
-                                  f"stop {s['stop']:.3f}{note}")
+                        action = (f"{'long' if direction > 0 else 'short'} {acct.qty:+.0f} @ {px:.5g}, "
+                                  f"stop {s['stop']:.5g}{note}")
             s["last_bar"] = str(last)
 
         mark = float(hourly["close"].iloc[-1]) if len(hourly) else s["entry"]
@@ -265,7 +305,7 @@ class PaperTrader:
         self._store_rc(rc)
         self._save()
         status = {"time": str(now), "price": mark, "equity": round(acct.equity(mark)), "qty": acct.qty,
-                  "side": s["side"], "stop": round(s["stop"], 3), "leverage_next": round(rc.leverage(), 3),
+                  "side": s["side"], "stop": float(f"{s['stop']:.5g}"), "leverage_next": round(rc.leverage(), 3),
                   "action": action}
         if fng_now is not None:
             status["fng"] = fng_now
@@ -274,8 +314,11 @@ class PaperTrader:
 
 
 def main(argv: list[str] | None = None) -> None:
-    p = argparse.ArgumentParser(description="Paper trade the 4h breakout on live GMO prices")
+    p = argparse.ArgumentParser(description="Paper trade the 4h breakout on live GMO or Hyperliquid prices")
     p.add_argument("command", choices=["step", "status"])
+    p.add_argument("--venue", choices=["gmo", "hl"], default="gmo",
+                   help="hl = Hyperliquid ADA perp in USD (200 USD account, hourly funding, 0.045%% fee)")
+    p.add_argument("--usd", type=float, default=200.0, help="starting balance for --venue hl")
     p.add_argument("--folder", default="data/paper")
     p.add_argument("--symbol", default=PaperConfig.symbol)
     p.add_argument("--no-short", action="store_true")
@@ -287,13 +330,21 @@ def main(argv: list[str] | None = None) -> None:
                    help="ask Claude before each entry (go / half / skip); needs ANTHROPIC_API_KEY")
     a = p.parse_args(argv)
 
-    cfg = PaperConfig(symbol=a.symbol, allow_short=not a.no_short, max_leverage=a.max_leverage, initial_jpy=a.jpy,
-                      fng_short_max=a.fng_short_max)
+    acct_cfg = None
+    if a.venue == "hl":
+        from btcbot.hyperliquid import account_config
+        symbol = "ADA" if a.symbol == PaperConfig.symbol else a.symbol
+        acct_cfg = account_config(a.usd)
+        cfg = PaperConfig(symbol=symbol, allow_short=not a.no_short, max_leverage=a.max_leverage, initial_jpy=a.usd,
+                          fng_short_max=a.fng_short_max)
+    else:
+        cfg = PaperConfig(symbol=a.symbol, allow_short=not a.no_short, max_leverage=a.max_leverage,
+                          initial_jpy=a.jpy, fng_short_max=a.fng_short_max)
     advisor = None
     if a.claude and a.command == "step":
         from btcbot.advisor import ClaudeAdvisor
         advisor = ClaudeAdvisor()
-    trader = PaperTrader(Path(a.folder), cfg, advisor=advisor)
+    trader = PaperTrader(Path(a.folder), cfg, acct_cfg, advisor=advisor)
     if a.command == "status":
         s = trader.state
         print(json.dumps({k: s[k] for k in ("collateral", "qty", "entry", "side", "stop", "last_check", "last_bar",
@@ -303,7 +354,8 @@ def main(argv: list[str] | None = None) -> None:
             t = pd.read_csv(trades)
             print(f"trades {len(t)}, win rate {(t['return'] > 0).mean():.0%}, avg {t['return'].mean():+.2%}")
         return
-    print(json.dumps(trader.step(GMOFeed(a.symbol)), default=str))
+    feed = HyperliquidFeed(cfg.symbol) if a.venue == "hl" else GMOFeed(cfg.symbol)
+    print(json.dumps(trader.step(feed), default=str))
 
 
 if __name__ == "__main__":

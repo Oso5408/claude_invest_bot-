@@ -180,3 +180,40 @@ def test_daily_review_reads_every_account(tmp_path):
     out = daily_review(tmp_path, r, now=datetime(2026, 9, 10, tzinfo=timezone.utc))
     assert out.read_text() == "ok"
     assert "## paper-claude" in r.summary and "## paper-rules" in r.summary and "Claude entry decisions" in r.summary
+
+
+def test_hyperliquid_feed_and_funding(tmp_path, monkeypatch):
+    from btcbot import hyperliquid as hl
+    from btcbot.paper import HyperliquidFeed
+
+    m = _minutes()
+    m[["open", "high", "low", "close"]] /= 100  # USD-sized prices
+
+    def fake_post(url, body, session=None):
+        if body["type"] == "candleSnapshot":
+            r = body["req"]
+            lo, hi = pd.Timestamp(r["startTime"], unit="ms", tz="UTC"), pd.Timestamp(r["endTime"], unit="ms", tz="UTC")
+            rule = {"1m": "1min", "1h": "1h"}[r["interval"]]
+            agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+            part = m[(m.index >= lo) & (m.index < hi)].resample(rule).agg(agg).dropna()
+            return [{"t": int(t.timestamp() * 1000), "o": str(x.open), "h": str(x.high), "l": str(x.low),
+                     "c": str(x.close), "v": str(x.volume)} for t, x in part.iterrows()]
+        if body["type"] == "l2Book":
+            return {"levels": [[{"px": "1.0"}], [{"px": "1.001"}]]}
+        if body["type"] == "fundingHistory":
+            hours = pd.date_range(pd.Timestamp(body["startTime"], unit="ms", tz="UTC").ceil("h"),
+                                  pd.Timestamp(body["endTime"], unit="ms", tz="UTC"), freq="1h")
+            return [{"coin": "ADA", "fundingRate": "0.0001", "premium": "0", "time": int(h.timestamp() * 1000)}
+                    for h in hours]
+        raise AssertionError(body)
+
+    monkeypatch.setattr(hl, "_post", fake_post)
+    feed = HyperliquidFeed("ADA")
+    feed.fng = lambda: pd.Series(dtype=float, index=pd.DatetimeIndex([], tz="UTC"))
+    cfg = PaperConfig(symbol="ADA", history_days=6, allow_short=False, initial_jpy=200)
+    out = []
+    for t in pd.date_range(m.index[0] + pd.Timedelta(days=3), m.index[-1], freq="1h"):
+        out.append(PaperTrader(tmp_path, cfg, hl.account_config(200)).step(feed, t.to_pydatetime()))
+    assert any(o["action"].startswith("long") for o in out)
+    state = json.loads((tmp_path / "state.json").read_text())
+    assert state["leverage_fees"] > 0  # longs paid the positive funding
