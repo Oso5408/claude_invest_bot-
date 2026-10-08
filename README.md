@@ -81,6 +81,7 @@ python -m btcbot.meanrev --csv data/ADA_JPY_1hour.csv
 python -m btcbot.breakout --csv data/ADA_JPY_1hour.csv                  # 1 小時 K 線
 python -m btcbot.breakout --csv data/ADA_JPY_1hour.csv --timeframe 4h   # 合併成 4 小時 K 線
 python -m btcbot.breakout --csv data/ADA_JPY_1hour.csv --no-short       # 只做多
+python -m btcbot.breakout --csv data/ADA_JPY_1hour.csv --timeframe 4h --no-short --max-leverage 1   # Alpaca 現貨：只做多、1 倍
 ```
 
 | 部分 | 做咩 |

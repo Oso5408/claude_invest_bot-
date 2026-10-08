@@ -108,3 +108,11 @@ def test_mtf_trend_and_volume_filters():
     assert not h["short_signal"].iloc[-1]
     vol2[-1] = 5000
     assert compute_features(_bars(close2, vol2), mtf_config())["short_signal"].iloc[-1]
+
+
+def test_soft_leverage_limit_for_spot():
+    df = random_walk(n=24 * 200, seed=3, start_price=100, vol=0.01, drift=0.0005)
+    res = run(df, BreakoutConfig(kelly_fraction=5.0, max_leverage=1.0, allow_short=False))
+    tr = res.trades[res.trades["qty"] != 0]
+    assert len(tr) and (tr["qty"] > 0).all()
+    assert (tr["qty"] * tr["entry_px"]).max() <= 1.0 * res.equity.max() * 1.001

@@ -38,6 +38,7 @@ class BreakoutConfig:
     atr_period: int = 14
     atr_mult: float = 2.0
     allow_short: bool = True
+    max_leverage: float = risk.MAX_LEVERAGE  # lower it for spot-only venues (e.g. 1.0); can never exceed risk.MAX_LEVERAGE
     short_needs_volume: bool = False
     trend_timeframe: str | None = None  # e.g. "4h": longs only above its EMA, shorts only below
     trend_ema: int = 50
@@ -160,7 +161,8 @@ def run(df: pd.DataFrame, cfg: BreakoutConfig | None = None, acct_cfg: AccountCo
                                              acct_cfg), px, acct_cfg.fee_rate)
         elif long_sig[t] or short_sig[t]:
             direction = 1 if long_sig[t] else -1
-            pending = (direction, direction * rc.leverage() * equity[t] / c[t], atr[t])
+            lev = min(rc.leverage(), cfg.max_leverage, risk.MAX_LEVERAGE)
+            pending = (direction, direction * lev * equity[t] / c[t], atr[t])
 
     eq = pd.Series(equity[: t + 1], index=f.index[: t + 1], name="equity")
     tr = pd.DataFrame(trades)
@@ -176,6 +178,7 @@ def main(argv: list[str] | None = None) -> None:
     src.add_argument("--synthetic", action="store_true", help="trending random data, for checking the code")
     p.add_argument("--jpy", type=float, default=AccountConfig.initial_jpy)
     p.add_argument("--no-short", action="store_true")
+    p.add_argument("--max-leverage", type=float, default=risk.MAX_LEVERAGE, help="e.g. 1 for spot-only (Alpaca)")
     p.add_argument("--timeframe", default=None, help="resample the CSV first, e.g. 4h")
     p.add_argument("--mtf", action="store_true", help="multi-timeframe preset: 4h EMA50 + 1.5x volume breakout both ways")
     p.add_argument("--trades-out")
@@ -188,7 +191,8 @@ def main(argv: list[str] | None = None) -> None:
         df = random_walk(start_price=100, vol=0.01, drift=0.0003)
     if a.timeframe:
         df = resample(df, a.timeframe)
-    cfg = mtf_config(allow_short=not a.no_short) if a.mtf else BreakoutConfig(allow_short=not a.no_short)
+    opts = dict(allow_short=not a.no_short, max_leverage=a.max_leverage)
+    cfg = mtf_config(**opts) if a.mtf else BreakoutConfig(**opts)
     res = run(df, cfg, AccountConfig(initial_jpy=a.jpy))
     print(format_stats(res.stats))
     if a.trades_out:
