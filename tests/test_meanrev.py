@@ -13,6 +13,9 @@ def test_cap_quantity_limits_to_2x():
     assert risk.cap_quantity(-1000, 100.0, 30_000) == pytest.approx(-600)
     assert risk.cap_quantity(100, 100.0, 30_000) == 100
     assert risk.cap_quantity(100, 100.0, 0) == 0
+    q = risk.cap_quantity(1000, 100.0, 30_000, fee_rate=0.0003)
+    acct = MarginAccount(30_000)
+    acct.set_position(q, 100.0, 0.0003)  # fee taken, still within 2x
 
 
 def test_account_refuses_more_than_2x():

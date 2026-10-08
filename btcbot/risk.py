@@ -20,11 +20,14 @@ class LeverageLimitError(RuntimeError):
     pass
 
 
-def cap_quantity(target_qty: float, price: float, equity: float) -> float:
-    """Shrink a signed target position so its value is at most MAX_LEVERAGE x equity."""
+def cap_quantity(target_qty: float, price: float, equity: float, fee_rate: float = 0.0) -> float:
+    """Shrink a signed target position so its value is at most MAX_LEVERAGE x equity.
+
+    The fee for opening from flat comes out of equity, so leave room for it.
+    """
     if equity <= 0 or price <= 0:
         return 0.0
-    max_qty = MAX_LEVERAGE * equity / price
+    max_qty = MAX_LEVERAGE * equity / (price * (1 + MAX_LEVERAGE * max(fee_rate, 0.0)))
     return max(-max_qty, min(max_qty, target_qty))
 
 

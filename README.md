@@ -61,7 +61,6 @@ python -m btcbot.data --symbol ADA_JPY --rules
 python -m btcbot.data --symbol ADA_JPY --start 2024-05-25
 # 3. 回測
 python -m btcbot.meanrev --csv data/ADA_JPY_1hour.csv
-python -m btcbot.meanrev --csv data/ADA_JPY_1hour.csv --min-order 10   # 換成第 1 步見到嘅 minOrderSize
 ```
 
 | 部分 | 做咩 |
@@ -73,7 +72,7 @@ python -m btcbot.meanrev --csv data/ADA_JPY_1hour.csv --min-order 10   # 換成�
 | 2 倍上限 | `btcbot/risk.py` 入面寫死 `MAX_LEVERAGE = 2.0`。每張單都會被截到 2 倍以內，帳戶喺每次成交再檢查，超過就直接報錯停低 |
 | 槓桿費 | 每日 06:00 仍然持倉，收倉位價值 0.04% |
 | 斬倉 | 保證金維持率跌到 75% 即時斬倉 |
-| 交易費 | GMO 槓桿交易免手續費，但每次成交計 0.05% 滑價 |
+| 交易費 | ADA_JPY taker 0.03%（maker 0%），另外每次成交計 0.05% 滑價。最少 10 ADA，每 10 ADA 一個單位 |
 
 ## 測試
 

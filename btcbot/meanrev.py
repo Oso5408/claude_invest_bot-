@@ -11,7 +11,7 @@ Sizing: a Beta posterior on the win rate plus the running average win and loss
 give the Kelly leverage f* = (p - (1 - p) / b) / avg_loss. We use a quarter of it,
 and risk.py caps every order at 2x equity no matter what.
 
-Account rules (GMO 暗号資産FX): no trading fee, 0.04% of position value per day
+Account rules (GMO 暗号資産FX): 0.03% taker fee on ADA_JPY, 0.04% of position value per day
 for positions held at the 06:00 JST rollover, loss cut at 75% maintenance ratio.
 Fills happen at the next bar's open plus slippage. No live orders anywhere.
 """
@@ -49,12 +49,12 @@ class MeanRevConfig:
 @dataclass
 class AccountConfig:
     initial_jpy: float = 30_000.0  # about 200 USD
-    fee_rate: float = 0.0  # GMO crypto FX charges no trading fee
+    fee_rate: float = 0.0003  # ADA_JPY taker fee per GMO symbols API (maker is 0)
     slippage: float = 0.0005  # spread + slippage per fill; ADA is thinner than BTC
     leverage_fee_per_day: float = 0.0004
     rollover_hour_jst: int = 6
-    min_order: float = 10.0  # ADA; check with `python -m btcbot.data --rules ADA_JPY`
-    size_step: float = 1.0
+    min_order: float = 10.0  # ADA_JPY rules from `python -m btcbot.data --symbol ADA_JPY --rules`
+    size_step: float = 10.0
 
 
 class LeverageKelly(BayesKelly):
@@ -155,7 +155,7 @@ def run(df: pd.DataFrame, cfg: MeanRevConfig | None = None, acct_cfg: AccountCon
                 close_signal(t, px, reason)
             else:
                 px = fill_price(o[t], target if target else (1 if action == "long" else -1))
-                capped = risk.cap_quantity(target, px, acct.equity(px))
+                capped = risk.cap_quantity(target, px, acct.equity(px), acct_cfg.fee_rate)
                 cap_hits += capped != target
                 acct.set_position(_round_qty(capped, acct_cfg), px, acct_cfg.fee_rate)
                 if action in ("long", "short"):
