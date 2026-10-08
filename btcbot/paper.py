@@ -26,7 +26,7 @@ import requests
 
 from btcbot import risk
 from btcbot.breakout import BreakoutConfig, compute_features
-from btcbot.data import BASE_URL, parse_klines, resample
+from btcbot.data import BASE_URL, FNG_URL, parse_fng, parse_klines, resample
 from btcbot.meanrev import AccountConfig, MarginAccount, RiskController, _round_qty
 from btcbot.strategy import StrategyConfig
 
@@ -42,6 +42,7 @@ class PaperConfig:
     max_leverage: float = risk.MAX_LEVERAGE
     initial_jpy: float = 30_000.0
     history_days: int = 20  # enough 4h candles for the 20-bar channel and ATR
+    fng_short_max: float = 100  # only short when the Fear & Greed Index is at or below this (100 = off)
 
 
 def rollovers_between(start: pd.Timestamp, end: pd.Timestamp, hour_jst: int) -> int:
@@ -82,6 +83,11 @@ class GMOFeed:
         row = payload["data"][0]
         return float(row["bid"]), float(row["ask"])
 
+    def fng(self) -> pd.Series:
+        resp = self.session.get(FNG_URL, params={"limit": 10, "format": "json"}, timeout=15)
+        resp.raise_for_status()
+        return parse_fng(resp.json())
+
 
 class PaperTrader:
     def __init__(self, folder: Path, cfg: PaperConfig | None = None, acct_cfg: AccountConfig | None = None,
@@ -90,7 +96,8 @@ class PaperTrader:
         self.folder.mkdir(parents=True, exist_ok=True)
         self.cfg = cfg or PaperConfig()
         self.acct_cfg = acct_cfg or AccountConfig(initial_jpy=self.cfg.initial_jpy)
-        self.strat = strat or BreakoutConfig(allow_short=self.cfg.allow_short, max_leverage=self.cfg.max_leverage)
+        self.strat = strat or BreakoutConfig(allow_short=self.cfg.allow_short, max_leverage=self.cfg.max_leverage,
+                                             fng_short_max=self.cfg.fng_short_max)
         self.state_path = self.folder / "state.json"
         self.state = self._load()
 
@@ -197,8 +204,20 @@ class PaperTrader:
         bars = resample(hourly, self.cfg.timeframe)
         bars = bars[bars.index + tf <= pd.Timestamp(now)]  # completed candles only
         action = "none"
+        fng_now = None
         if len(bars):
-            f = compute_features(bars, self.strat)
+            fng = None
+            if self.strat.fng_short_max < 100:
+                try:
+                    fng = feed.fng()
+                except Exception as e:  # no index -> no shorts this time, never a guess
+                    fng = pd.Series(dtype=float, index=pd.DatetimeIndex([], tz="UTC"))
+                    action = f"none (Fear & Greed unavailable: {e})"
+            f = compute_features(bars, self.strat, fng)
+            if fng is not None:
+                fng_now = None if f["fng"].isna().iloc[-1] else float(f["fng"].iloc[-1])
+                if fng_now is None:
+                    f.loc[f.index[-1], "short_signal"] = False
             last = f.index[-1]
             if s["last_bar"] is None:
                 action = "started: waiting for the next 4h candle to close"
@@ -231,6 +250,8 @@ class PaperTrader:
         status = {"time": str(now), "price": mark, "equity": round(acct.equity(mark)), "qty": acct.qty,
                   "side": s["side"], "stop": round(s["stop"], 3), "leverage_next": round(rc.leverage(), 3),
                   "action": action}
+        if fng_now is not None:
+            status["fng"] = fng_now
         self._append("equity.csv", status)
         return status
 
@@ -243,9 +264,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--no-short", action="store_true")
     p.add_argument("--max-leverage", type=float, default=risk.MAX_LEVERAGE)
     p.add_argument("--jpy", type=float, default=PaperConfig.initial_jpy)
+    p.add_argument("--fng-short-max", type=float, default=PaperConfig.fng_short_max,
+                   help="only short when the Fear & Greed Index is at or below this, e.g. 50")
     a = p.parse_args(argv)
 
-    cfg = PaperConfig(symbol=a.symbol, allow_short=not a.no_short, max_leverage=a.max_leverage, initial_jpy=a.jpy)
+    cfg = PaperConfig(symbol=a.symbol, allow_short=not a.no_short, max_leverage=a.max_leverage, initial_jpy=a.jpy,
+                      fng_short_max=a.fng_short_max)
     trader = PaperTrader(Path(a.folder), cfg)
     if a.command == "status":
         s = trader.state

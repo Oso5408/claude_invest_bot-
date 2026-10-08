@@ -116,6 +116,17 @@ python -m btcbot.breakout --csv data/ADA_JPY_15min.csv --mtf
 - 入市：15 分鐘 K 線收市突破之前 20 條最高價（做多）或者跌穿之前 20 條最低價（做空），而且成交量大過之前 20 條平均嘅 1.5 倍。
 - 平倉同注碼：同策略 B 一樣（2 × ATR 移動止損，RiskController 預設勝率 35%、盈虧比 2.5）。
 
+## 恐懼與貪婪指數過濾（`--fng-csv`）
+
+```bash
+python -m btcbot.data --fng      # alternative.me 免費每日數據，存去 data/fear_greed.csv
+python -m btcbot.breakout --csv data/ADA_JPY_1hour.csv --timeframe 4h --fng-csv data/fear_greed.csv --fng-short 0 50
+```
+
+- `--fng-long MIN MAX`、`--fng-short MIN MAX`：指數喺呢個範圍入面先准做多／做空。預設 0 至 100，即係唔過濾。
+- 每日嘅數值第二日先用，避免用到當時未公佈嘅數字。
+- 模擬盤用 `--fng-short-max 50`：指數 50 或以下先准做空。攞唔到指數嗰次就唔做空。
+
 ## 模擬盤（`btcbot/paper.py`）
 
 用 GMO 即時公開報價，用假錢跑 4 小時突破策略。唔使開帳戶，亦唔使 API 金鑰。喺 GCP 東京機房設定嘅步驟見 [docs/gcp-setup.md](docs/gcp-setup.md)。

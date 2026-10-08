@@ -82,3 +82,31 @@ def test_paper_trader_respects_2x(tmp_path):
         st = trader.step(feed, t.to_pydatetime())
         if st["qty"]:
             assert abs(st["qty"]) * st["price"] <= risk.MAX_LEVERAGE * st["equity"] * 1.05
+
+
+class FngFeed(FakeFeed):
+    def __init__(self, minutes, value, fail=False):
+        super().__init__(minutes)
+        self.value, self.fail = value, fail
+
+    def fng(self):
+        if self.fail:
+            raise ConnectionError("down")
+        days = pd.date_range(self.m.index[0].floor("D") - pd.Timedelta(days=2), self.now.floor("D"), freq="D")
+        return pd.Series(self.value, index=days)
+
+
+def _sides(tmp_path, feed, cfg):
+    m = feed.m
+    for t in pd.date_range(m.index[0] + pd.Timedelta(days=3), m.index[-1], freq="1h"):
+        PaperTrader(tmp_path, cfg).step(feed, t.to_pydatetime())
+    tr = tmp_path / "trades.csv"
+    return set(pd.read_csv(tr)["side"]) if tr.exists() else set()
+
+
+def test_paper_fng_filter_blocks_shorts_in_greed(tmp_path):
+    m = _minutes()
+    cfg = PaperConfig(history_days=6, fng_short_max=50)
+    assert -1 in _sides(tmp_path / "fear", FngFeed(m, 20.0), cfg)
+    assert -1 not in _sides(tmp_path / "greed", FngFeed(m, 80.0), cfg)
+    assert -1 not in _sides(tmp_path / "down", FngFeed(m, 20.0, fail=True), cfg)  # unknown -> no shorts
