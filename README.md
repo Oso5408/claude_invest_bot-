@@ -116,6 +116,16 @@ python -m btcbot.breakout --csv data/ADA_JPY_15min.csv --mtf
 - 入市：15 分鐘 K 線收市突破之前 20 條最高價（做多）或者跌穿之前 20 條最低價（做空），而且成交量大過之前 20 條平均嘅 1.5 倍。
 - 平倉同注碼：同策略 B 一樣（2 × ATR 移動止損，RiskController 預設勝率 35%、盈虧比 2.5）。
 
+## 模擬盤（`btcbot/paper.py`）
+
+用 GMO 即時公開報價，用假錢跑 4 小時突破策略。唔使開帳戶，亦唔使 API 金鑰。喺 GCP 東京機房設定嘅步驟見 [docs/gcp-setup.md](docs/gcp-setup.md)。
+
+```bash
+python -m btcbot.paper step --folder data/paper-2x                                   # 每 5 分鐘行一次
+python -m btcbot.paper step --folder data/paper-1x-long --no-short --max-leverage 1
+python -m btcbot.paper status --folder data/paper-2x
+```
+
 ## 測試
 
 ```bash
