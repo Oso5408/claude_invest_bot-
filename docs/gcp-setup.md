@@ -73,7 +73,10 @@ crontab -e
 ```
 */5 * * * * cd $HOME/claude_invest_bot- && .venv/bin/python -m btcbot.paper step --folder data/paper-2x >> data/paper-2x.log 2>&1
 */5 * * * * cd $HOME/claude_invest_bot- && .venv/bin/python -m btcbot.paper step --folder data/paper-1x-long --no-short --max-leverage 1 >> data/paper-1x-long.log 2>&1
+*/5 * * * * cd $HOME/claude_invest_bot- && .venv/bin/python -m btcbot.paper step --folder data/paper-2x-fng --fng-short-max 50 >> data/paper-2x-fng.log 2>&1
 ```
+
+第三行係同第一行一樣嘅 2 倍雙向帳戶，但係恐懼與貪婪指數高過 50 就唔開空單，用嚟同第一行比較。
 
 撳 `Ctrl+O`、`Enter` 儲存，再撳 `Ctrl+X` 離開。
 
