@@ -162,6 +162,16 @@ cd ~/claude_invest_bot- && git pull
 
 睇結果：`.venv/bin/python -m btcbot.paper status --venue hl --folder data/paper-hl-2x-fng`
 
+### 10b. Hyperliquid + Claude 把關帳戶
+
+同 `paper-hl-2x-fng` 一樣嘅規則，再加 Claude 喺每次開倉前把關（照做 / 減半 / 唔做，見第 9 節）。需要 `~/.anthropic_env`。舊嘅 GMO 版本 `paper-2x-fng-claude` 已經由呢個取代，crontab 嗰行可以加 `#` 停咗佢。
+
+```
+*/5 * * * * . $HOME/.anthropic_env; cd $HOME/claude_invest_bot- && .venv/bin/python -m btcbot.paper step --venue hl --folder data/paper-hl-2x-fng-claude --fng-short-max 50 --claude >> data/paper-hl-2x-fng-claude.log 2>&1
+```
+
+睇結果：`.venv/bin/python -m btcbot.paper status --venue hl --folder data/paper-hl-2x-fng-claude`；Claude 每次決定喺 `data/paper-hl-2x-fng-claude/claude.csv`（有訊號先會有）。每日檢討（第 9 節）會自動包埋呢個帳戶。
+
 ## 11. 監察系統同 Telegram 警報
 
 監察系統係一個獨立嘅 cron 程式，同模擬盤分開行。就算模擬盤死咗，佢都會通知你。佢做三樣嘢：
