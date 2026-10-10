@@ -113,8 +113,14 @@ def funding_per_bar(index: pd.DatetimeIndex, funding: pd.Series) -> np.ndarray:
 
 
 def run(df: pd.DataFrame, cfg: BreakoutConfig | None = None, acct_cfg: AccountConfig | None = None,
-        fng: pd.Series | None = None, funding: pd.Series | None = None) -> Result:
-    """`funding`: hourly perp funding rates. When given it replaces the GMO daily leverage fee."""
+        fng: pd.Series | None = None, funding: pd.Series | None = None, entry_fill=None) -> Result:
+    """`funding`: hourly perp funding rates. When given it replaces the GMO daily leverage fee.
+
+    `entry_fill(t, direction, signal_close, signal_atr)` decides how an entry signalled at
+    bar t - 1 gets filled during bar t (see btcbot/execution.py). It returns
+    (price, fee_rate, low_after, high_after), the range the price covered after the fill
+    inside bar t, or None when the order was not filled (the signal is dropped).
+    Default: market order at bar t's open."""
     cfg = cfg or BreakoutConfig()
     acct_cfg = acct_cfg or AccountConfig()
     f = compute_features(df, cfg, fng)
@@ -130,9 +136,9 @@ def run(df: pd.DataFrame, cfg: BreakoutConfig | None = None, acct_cfg: AccountCo
     side, sig_entry, sig_days, entry_time, sig_qty = 0, 0.0, 0, None, 0.0
     sig_funding = 0.0  # funding paid per unit of notional over the trade (negative = received)
     stop, best, entry_atr = 0.0, 0.0, 0.0
-    pending: tuple[int, float, float] | None = None  # (direction, qty, atr at signal)
+    pending: tuple[int, float, float, float] | None = None  # (direction, qty, atr at signal, signal close)
     equity = np.empty(len(f))
-    trades, loss_cuts, cap_hits = [], 0, 0
+    trades, loss_cuts, cap_hits, missed, entry_fee = [], 0, 0, 0, acct_cfg.fee_rate
 
     def fill_price(price: float, delta: float) -> float:
         return price * (1 + acct_cfg.slippage * np.sign(delta))
@@ -141,7 +147,7 @@ def run(df: pd.DataFrame, cfg: BreakoutConfig | None = None, acct_cfg: AccountCo
         nonlocal side
         acct.set_position(0.0, px, acct_cfg.fee_rate)
         carry = sig_funding if fund is not None else acct_cfg.leverage_fee_per_day * sig_days
-        ret = side * (px / sig_entry - 1) - carry - 2 * acct_cfg.fee_rate
+        ret = side * (px / sig_entry - 1) - carry - entry_fee - acct_cfg.fee_rate
         rc.update(ret)
         trades.append({"entry_time": entry_time, "exit_time": f.index[t], "side": side, "entry_px": sig_entry,
                        "exit_px": px, "qty": sig_qty, "return": ret, "reason": reason, "lev_after": rc.leverage()})
@@ -149,17 +155,26 @@ def run(df: pd.DataFrame, cfg: BreakoutConfig | None = None, acct_cfg: AccountCo
 
     for t in range(len(f)):
         # 1. fill the entry decided at the previous close
+        bar_open, bar_lo, bar_hi = o[t], l[t], h[t]  # the part of this bar the position is exposed to
         if pending is not None:
-            direction, target, entry_atr = pending
+            direction, target, entry_atr, sig_close = pending
             pending = None
-            px = fill_price(o[t], direction)
-            capped = risk.cap_quantity(target, px, acct.equity(px), acct_cfg.fee_rate)
-            cap_hits += capped != target
-            acct.set_position(_round_qty(capped, acct_cfg), px, acct_cfg.fee_rate)
-            side, sig_entry, sig_days, entry_time, sig_qty = direction, px, 0, f.index[t], acct.qty
-            sig_funding = 0.0
-            best = px
-            stop = px - side * cfg.atr_mult * entry_atr
+            if entry_fill is None:
+                fill = (fill_price(o[t], direction), acct_cfg.fee_rate, l[t], h[t])
+            else:
+                fill = entry_fill(t, direction, sig_close, entry_atr)
+            if fill is None:
+                missed += 1
+            else:
+                px, entry_fee, bar_lo, bar_hi = fill
+                bar_open = px
+                capped = risk.cap_quantity(target, px, acct.equity(px), entry_fee)
+                cap_hits += capped != target
+                acct.set_position(_round_qty(capped, acct_cfg), px, entry_fee)
+                side, sig_entry, sig_days, entry_time, sig_qty = direction, px, 0, f.index[t], acct.qty
+                sig_funding = 0.0
+                best = px
+                stop = px - side * cfg.atr_mult * entry_atr
 
         # 2. carrying cost: GMO's daily leverage fee at the 06:00 JST rollover, or perp funding
         if side and fund is not None:
@@ -173,15 +188,15 @@ def run(df: pd.DataFrame, cfg: BreakoutConfig | None = None, acct_cfg: AccountCo
 
         # 3. trailing stop, then the exchange loss cut, both inside the bar
         if side:
-            hit = l[t] <= stop if side > 0 else h[t] >= stop
+            hit = bar_lo <= stop if side > 0 else bar_hi >= stop
             if hit:
-                px = min(o[t], stop) if side > 0 else max(o[t], stop)
+                px = min(bar_open, stop) if side > 0 else max(bar_open, stop)
                 close_trade(t, fill_price(px, -side), "trailing_stop")
         if side and acct.qty:
-            worst = l[t] if acct.qty > 0 else h[t]
+            worst = bar_lo if acct.qty > 0 else bar_hi
             if risk.maintenance_ratio(acct.equity(worst), acct.qty, worst) <= risk.LOSS_CUT_RATIO:
                 lc = risk.loss_cut_price(acct.collateral, acct.qty, acct.entry)
-                px = min(o[t], lc) if acct.qty > 0 else max(o[t], lc)
+                px = min(bar_open, lc) if acct.qty > 0 else max(bar_open, lc)
                 close_trade(t, fill_price(px, -acct.qty), "loss_cut")
                 loss_cuts += 1
 
@@ -194,7 +209,7 @@ def run(df: pd.DataFrame, cfg: BreakoutConfig | None = None, acct_cfg: AccountCo
 
         # 4. at the close: move the stop, or look for a new breakout
         if side:
-            best = max(best, h[t]) if side > 0 else min(best, l[t])
+            best = max(best, bar_hi) if side > 0 else min(best, bar_lo)
             trail = best - side * cfg.atr_mult * atr[t]
             stop = max(stop, trail) if side > 0 else min(stop, trail)
             if abs(acct.qty) * c[t] > risk.MAX_LEVERAGE * equity[t]:
@@ -205,11 +220,13 @@ def run(df: pd.DataFrame, cfg: BreakoutConfig | None = None, acct_cfg: AccountCo
         elif long_sig[t] or short_sig[t]:
             direction = 1 if long_sig[t] else -1
             lev = min(rc.leverage(), cfg.max_leverage, risk.MAX_LEVERAGE)
-            pending = (direction, direction * lev * equity[t] / c[t], atr[t])
+            pending = (direction, direction * lev * equity[t] / c[t], atr[t], c[t])
 
     eq = pd.Series(equity[: t + 1], index=f.index[: t + 1], name="equity")
     tr = pd.DataFrame(trades)
-    return Result(eq, tr, _stats(eq, tr, df, acct, acct_cfg, loss_cuts, cap_hits))
+    stats = _stats(eq, tr, df, acct, acct_cfg, loss_cuts, cap_hits)
+    stats["missed_entries"] = missed
+    return Result(eq, tr, stats)
 
 
 def main(argv: list[str] | None = None) -> None:
