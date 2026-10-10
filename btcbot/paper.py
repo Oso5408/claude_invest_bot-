@@ -8,7 +8,8 @@ No account, no API key, no real orders. Each run of `python -m btcbot.paper step
    breakout at the current ask (long) / bid (short) plus the taker fee.
 4. Saves the state to data/paper/state.json and appends to trades.csv / equity.csv.
 
-Run it every 5 minutes from cron (see docs/gcp-setup.md). The strategy logic,
+Run it every 5 minutes from cron (see docs/gcp-setup.md). Each processed 4h candle is logged to signals.csv
+for the independent monitor (btcbot/monitor.py); a PAUSE file stops new entries. The strategy logic,
 sizing (RiskController) and the 2x cap are the same code the backtest uses.
 """
 
@@ -53,6 +54,25 @@ def rollovers_between(start: pd.Timestamp, end: pd.Timestamp, hour_jst: int) -> 
     if first <= s:
         first += pd.Timedelta(days=1)
     return 0 if first > e else int((e - first) // pd.Timedelta(days=1)) + 1
+
+
+def check_bar_data(hourly: pd.DataFrame, bar: pd.Timestamp, tf: pd.Timedelta, now: datetime) -> str | None:
+    """Why a just-closed bar must not be traded yet, or None if its data looks complete and fresh."""
+    if hourly.empty:
+        return "no 1h candles"
+    newest = hourly.index.max()
+    if newest < pd.Timestamp(now) - pd.Timedelta(hours=2):
+        return f"stale data: newest 1h candle {newest}"
+    have = int(((hourly.index >= bar) & (hourly.index < bar + tf)).sum())
+    need = int(tf / pd.Timedelta(hours=1))
+    if have < need:
+        return f"incomplete {tf} candle {bar}: {have}/{need} hourly candles"
+    return None
+
+
+def paused(folder: Path) -> bool:
+    """A PAUSE file in the account folder or its parent (all accounts) blocks new entries."""
+    return (folder / "PAUSE").exists() or (folder.parent / "PAUSE").exists()
 
 
 def gmo_business_date(t: datetime) -> str:
@@ -260,18 +280,35 @@ class PaperTrader:
                 if fng_now is None and self.strat.fng_short_max < 100:
                     f.loc[f.index[-1], "short_signal"] = False
             last = f.index[-1]
+            problem = check_bar_data(hourly, last, tf, now)
+            new_bar = s["last_bar"] is None or last > pd.Timestamp(s["last_bar"])
             if s["last_bar"] is None:
                 action = "started: waiting for the next 4h candle to close"
-            elif last > pd.Timestamp(s["last_bar"]):
+            elif new_bar and problem:
+                # skip rather than guess; the bar is retried on the next run
+                action = f"none (data check: {problem})"
+            elif new_bar:
                 row = f.iloc[-1]
+                direction = 1 if row["long_signal"] else -1 if row["short_signal"] else 0
+                key = f"{last.isoformat()}:{'long' if direction > 0 else 'short'}"
+                side_before, result = s["side"], "no_signal"
                 if s["side"]:
                     best = max(s["best"], row["high"]) if s["side"] > 0 else min(s["best"], row["low"])
                     trail = best - s["side"] * self.strat.atr_mult * row["atr"]
                     s["best"] = best
                     s["stop"] = max(s["stop"], trail) if s["side"] > 0 else min(s["stop"], trail)
                     action = f"trail stop -> {s['stop']:.3f}"
-                elif not np.isnan(row["atr"]) and (row["long_signal"] or row["short_signal"]):
-                    direction = 1 if row["long_signal"] else -1
+                    result = "in_position" if direction else "no_signal"
+                elif direction and np.isnan(row["atr"]):
+                    result = "no_atr"
+                elif direction and s.get("last_signal_key") == key:
+                    result = "duplicate"
+                    action = f"duplicate signal {key} ignored"
+                elif direction and paused(self.folder):
+                    result = "paused"
+                    action = f"{'long' if direction > 0 else 'short'} signal not taken: PAUSE file present"
+                elif direction:
+                    s["last_signal_key"] = key
                     bid, ask = feed.bid_ask()
                     px = ask if direction > 0 else bid
                     lev = min(rc.leverage(), self.strat.max_leverage, risk.MAX_LEVERAGE)
@@ -290,14 +327,22 @@ class PaperTrader:
                     target = risk.cap_quantity(direction * lev * eq / px, px, eq, self.acct_cfg.fee_rate)
                     qty = _round_qty(target, self.acct_cfg)
                     if qty == 0:
+                        result = "claude_skip" if note and lev == 0 else "skipped_size"
                         action = f"{'long' if direction > 0 else 'short'} signal skipped{note}"
                     else:
+                        result = "entered"
                         acct.set_position(qty, px, self.acct_cfg.fee_rate)
                         s.update(side=direction, sig_entry=px, entry_time=str(now), sig_days=0, sig_funding=0.0, best=px,
                                  stop=px - direction * self.strat.atr_mult * row["atr"], entry_qty=acct.qty)
                         action = (f"{'long' if direction > 0 else 'short'} {acct.qty:+.0f} @ {px:.5g}, "
                                   f"stop {s['stop']:.5g}{note}")
-            s["last_bar"] = str(last)
+                self._append("signals.csv", {"bar": str(last), "time": str(now), "close": row["close"],
+                                             "long_signal": bool(row["long_signal"]),
+                                             "short_signal": bool(row["short_signal"]),
+                                             "side_before": side_before, "side_after": s["side"], "result": result,
+                                             "entry_px": s["sig_entry"] if result == "entered" else None})
+            if not (new_bar and problem and s["last_bar"] is not None):
+                s["last_bar"] = str(last)
 
         mark = float(hourly["close"].iloc[-1]) if len(hourly) else s["entry"]
         s["last_check"] = str(now)
