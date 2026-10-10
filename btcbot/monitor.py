@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -30,6 +31,7 @@ from btcbot.data import fetch_fng, resample
 OFFLINE_MINUTES = 15  # three missed 5-minute runs
 DATA_CHECK_RUNS = 3  # consecutive runs that skipped a candle because of bad data
 REPEAT_HOURS = 6
+GMO_PAUSE = 1.0  # seconds between GMO requests in the check
 GRACE = pd.Timedelta(minutes=20)  # give the trader time to process a closed candle (and retry bad data)
 OK_RESULTS = {"entered", "in_position", "no_signal"}
 SKIP_RESULTS = {"skipped_size", "claude_skip"}  # sizing or Claude decided against it: reported, not an alert
@@ -78,7 +80,9 @@ def raise_problems(state: MonitorState, problems: dict[str, str], now: datetime,
             out.append(("🔴 " if prev is None else "🔁 仍然未解決：") + text)
             active[key] = {"since": prev["since"] if prev else now.isoformat(), "sent": now.isoformat(), "text": text}
     for key in [k for k in active if k.startswith(scope) and k not in problems]:
-        out.append(f"🟢 已恢復：{active.pop(key)['text']}")
+        text = active.pop(key)["text"]
+        if not key.endswith(":errors"):  # log errors just stop; no recovery message for them
+            out.append(f"🟢 已恢復：{text}")
     return out
 
 
@@ -116,8 +120,8 @@ def watch_folder(folder: Path, state: MonitorState, now: datetime) -> dict[str, 
     log = folder.parent / f"{name}.log"
     if log.exists():
         offsets = state.data["log_offsets"]
-        start = offsets.get(name, 0)
         size = log.stat().st_size
+        start = offsets.get(name, size)  # first time: only watch errors written from now on
         if size < start:  # log was rotated or cleared
             start = 0
         with log.open("rb") as fh:
@@ -126,8 +130,8 @@ def watch_folder(folder: Path, state: MonitorState, now: datetime) -> dict[str, 
         offsets[name] = size
         errors = [ln for ln in new.splitlines() if any(w in ln for w in ERROR_WORDS)]
         if errors:
-            key = f"watch:{name}:errors:{now:%Y%m%d%H%M}"  # a new event each time, never "recovers"
-            problems[key] = f"[{name}] log 有 {len(errors)} 行錯誤，最後一行：{errors[-1][:300]}"
+            # stays one active problem while new errors keep appearing (e.g. exchange maintenance)
+            problems[f"watch:{name}:errors"] = f"[{name}] log 有 {len(errors)} 行錯誤，最後一行：{errors[-1][:300]}"
     return problems
 
 
@@ -140,10 +144,7 @@ def watch(data_dir: Path, now: datetime | None = None, send=alerts.send) -> list
         problems["watch:none"] = f"搵唔到任何模擬帳戶（{data_dir}/paper*/state.json）。"
     for folder in folders:
         problems.update(watch_folder(folder, state, now))
-    # error lines are one-off events: send them, but do not keep them as active problems
     msgs = raise_problems(state, problems, now, "watch:")
-    for key in [k for k in state.data["active"] if ":errors:" in k]:
-        state.data["active"].pop(key)
     state.data["last_watch"] = now.isoformat()
     state.save()
     for m in msgs:
@@ -155,6 +156,22 @@ def watch(data_dir: Path, now: datetime | None = None, send=alerts.send) -> list
 def make_feed(v: str, symbol: str):
     from btcbot.paper import GMOFeed, HyperliquidFeed
     return HyperliquidFeed(symbol) if v == "hl" else GMOFeed(symbol)
+
+
+HISTORY_DAYS = 6  # 20-bar channel + 14-bar ATR on 4h candles need under 4 days of warm-up
+
+
+def fetch_hourly(feed, now: datetime, days: int) -> pd.DataFrame:
+    """Hourly candles for the check. GMO serves one day per request, so go slowly to stay under its rate limit."""
+    if not hasattr(feed, "_klines") or getattr(feed, "has_funding", False):
+        return feed.candles("1hour", now, days)
+    from btcbot.paper import gmo_business_date
+    frames = []
+    for d in range(days, -1, -1):
+        frames.append(feed._klines("1hour", gmo_business_date(now - timedelta(days=d))))
+        time.sleep(GMO_PAUSE)
+    df = pd.concat(frames)
+    return df[~df.index.duplicated(keep="last")].sort_index()
 
 
 def expected_signals(hourly: pd.DataFrame, cfg: dict, fng: pd.Series | None, now: datetime) -> pd.DataFrame:
@@ -229,22 +246,26 @@ def run_check(data_dir: Path, now: datetime | None = None, days: float = 2, send
     seen = set(state.data["seen"])
     since = pd.Timestamp(now) - pd.Timedelta(days=days)
     feeds = feeds if feeds is not None else {}
-    cache: dict[tuple, pd.DataFrame] = {}
+    cache: dict[tuple, pd.DataFrame | Exception] = {}
     results: dict[str, list[dict]] = {}
-    msgs = []
+    msgs, failures = [], {}
     for folder in account_folders(data_dir):
         name = folder.name
         try:
             cfg = json.loads((folder / "state.json").read_text()).get("config", {})
             key = (venue(cfg), cfg.get("symbol", "ADA_JPY"))
-            if key not in cache:
-                feed = feeds.get(key) or make_feed(*key)
-                cache[key] = feed.candles("1hour", now, int(days) + 22)
+            if key not in cache:  # one download per venue and symbol, failures included
+                try:
+                    cache[key] = fetch_hourly(feeds.get(key) or make_feed(*key), now, int(days) + HISTORY_DAYS)
+                except Exception as e:
+                    cache[key] = e
+            if isinstance(cache[key], Exception):
+                raise cache[key]
             if cfg.get("fng_short_max", 100) < 100 and fng is None:
                 fng = fetch_fng()
             rows = compare(folder, expected_signals(cache[key], cfg, fng, now), since, now)
         except Exception as e:
-            msgs.append(f"⚠️ [{name}] 漏單檢查做唔到：{e}")
+            failures[f"checkerr:{name}"] = f"[{name}] 漏單檢查做唔到：{str(e)[:300]}"
             continue
         results[name] = rows
         for row in rows:
@@ -255,6 +276,8 @@ def run_check(data_dir: Path, now: datetime | None = None, days: float = 2, send
             elif row["status"] == "skipped" and k not in seen:
                 msgs.append("ℹ️ " + describe(name, row))
                 seen.add(k)
+    # a failed check (exchange maintenance, rate limit) is reported once, repeated every few hours, then cleared
+    msgs += [m.replace("🔴 ", "⚠️ ", 1) for m in raise_problems(state, failures, now, "checkerr:")]
     state.data["seen"] = sorted(seen)
     state.data["last_check"] = now.isoformat()
     state.save()

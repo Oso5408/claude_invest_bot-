@@ -83,7 +83,8 @@ def test_watch_offline_errors_leverage_and_recovery(tmp_path):
     folder = tmp_path / "paper-a"
     feed, now = _run_paper(folder, m, PaperConfig(history_days=6, allow_short=False))
     sent = []
-    assert monitor.watch(tmp_path, now + timedelta(minutes=5), send=sent.append) == []
+    (tmp_path / "paper-a.log").write_text("Traceback: an old error from before the monitor started\n")
+    assert monitor.watch(tmp_path, now + timedelta(minutes=5), send=sent.append) == []  # old errors ignored
 
     later = now + timedelta(minutes=30)
     msgs = monitor.watch(tmp_path, later, send=sent.append)
@@ -91,7 +92,8 @@ def test_watch_offline_errors_leverage_and_recovery(tmp_path):
     assert monitor.watch(tmp_path, later + timedelta(minutes=5), send=sent.append) == []  # no spam
     assert len(monitor.watch(tmp_path, later + timedelta(hours=7), send=sent.append)) == 1  # reminder
 
-    (tmp_path / "paper-a.log").write_text('{"ok": 1}\nTraceback (most recent call last):\nValueError: boom\n')
+    with (tmp_path / "paper-a.log").open("a") as fh:
+        fh.write('{"ok": 1}\nTraceback (most recent call last):\nValueError: boom\n')
     st = json.loads((folder / "state.json").read_text())
     eq = pd.read_csv(folder / "equity.csv")
     st["qty"] = 3 * eq["equity"].iloc[-1] / eq["price"].iloc[-1]  # 3x, over the cap
@@ -115,3 +117,18 @@ def test_report_writes_summary(tmp_path):
     out = monitor.report(tmp_path, now, send=sent.append, feeds={("gmo", "ADA_JPY"): feed})
     text = out.read_text()
     assert "[paper-a] 運行" in text and "漏單 0" in text and sent[-1].startswith("📋")
+
+
+def test_check_failure_is_reported_once(tmp_path):
+    m = _minutes()
+    folder = tmp_path / "paper-a"
+    _, now = _run_paper(folder, m, PaperConfig(history_days=6, allow_short=False))
+
+    class Down:
+        def candles(self, *a):
+            raise RuntimeError("MAINTENANCE")
+
+    sent = []
+    for i in range(3):
+        monitor.run_check(tmp_path, now + timedelta(hours=i), send=sent.append, feeds={("gmo", "ADA_JPY"): Down()})
+    assert len(sent) == 1 and "MAINTENANCE" in sent[0]
