@@ -162,7 +162,72 @@ cd ~/claude_invest_bot- && git pull
 
 睇結果：`.venv/bin/python -m btcbot.paper status --venue hl --folder data/paper-hl-2x-fng`
 
-## 11. 停止
+## 11. 監察系統同 Telegram 警報
+
+監察系統係一個獨立嘅 cron 程式，同模擬盤分開行。就算模擬盤死咗，佢都會通知你。佢做三樣嘢：
+
+- **每 5 分鐘（watch）：** 檢查每個 `data/paper-*` 帳戶有冇準時更新（超過 15 分鐘冇更新就報警）、log 有冇新嘅錯誤、有冇連續 3 次因為數據唔完整而暫停入市、槓桿有冇超過上限。
+- **每個鐘（check）：** 漏單檢查。自己重新下載 K 線，用同一套策略重新計一次訊號，再同模擬盤嘅 `signals.csv` 對比。有訊號但模擬盤冇處理、或者兩邊計出嚟唔一樣，就即刻報警。
+- **每日朝早 9:35（report）：** 將過去 24 小時嘅運行次數、資金變化、訊號同漏單數目，發一份報告去 Telegram。如果有一日冇收到呢份報告，即係監察系統本身停咗。
+
+模擬盤本身亦加咗三個保護：
+- 4 小時 K 線要有齊 4 條 1 小時 K 線、而且數據唔可以過時，先會用嚟交易。唔齊就跳過，下次再試，唔會靠估。
+- 每個訊號有一個 key（K 線時間加方向），同一個訊號唔會入市兩次。
+- 放一個叫 `PAUSE` 嘅檔案就會停止開新倉，但係止損照樣運作。
+
+**1. 更新程式**（PR 未 merge 之前要轉去新 branch）：
+
+```bash
+cd ~/claude_invest_bot- && git fetch origin && git checkout claude/project-thread-v2ngyd && git pull
+```
+
+**2. 開 Telegram bot：**
+1. 喺 Telegram 搜尋 `@BotFather`，打 `/newbot`，跟住改個名，例如 `ada_monitor_bot`。
+2. 佢會俾你一串 token，好似 `123456:ABC-xyz...`。呢串嘢等於密碼，唔好貼俾任何人，亦唔好放入 git。
+3. 喺 Telegram 打開你新開嘅 bot，撳 **Start**，再打一句 `hi`。
+
+**3. 喺 VM 儲存 token**（將 `你的token` 換成真嘅 token）：
+
+```bash
+echo 'export TELEGRAM_BOT_TOKEN=你的token' > ~/.telegram_env
+chmod 600 ~/.telegram_env
+cd ~/claude_invest_bot- && . ~/.telegram_env && .venv/bin/python -m btcbot.alerts chat-id
+```
+
+最後一行會印出 `TELEGRAM_CHAT_ID=數字`。將嗰個數字加入檔案，然後試發一個訊息：
+
+```bash
+echo 'export TELEGRAM_CHAT_ID=上面嗰個數字' >> ~/.telegram_env
+. ~/.telegram_env && .venv/bin/python -m btcbot.alerts test
+```
+
+Telegram 收到「監察系統測試訊息」就成功。
+
+**4. 喺 crontab 加三行**（`crontab -e`，加喺最尾）：
+
+```
+*/5 * * * * . $HOME/.telegram_env; cd $HOME/claude_invest_bot- && .venv/bin/python -m btcbot.monitor watch >> data/monitor.log 2>&1
+25 * * * * . $HOME/.telegram_env; cd $HOME/claude_invest_bot- && .venv/bin/python -m btcbot.monitor check >> data/monitor.log 2>&1
+35 0 * * * . $HOME/.telegram_env; cd $HOME/claude_invest_bot- && .venv/bin/python -m btcbot.monitor report >> data/monitor.log 2>&1
+```
+
+第三行用 UTC 時間，00:35 UTC 即係日本時間 09:35。打 `date` 可以睇部機用緊咩時區，GCP 預設係 UTC。
+
+**5. 平時用法：**
+
+```bash
+touch ~/claude_invest_bot-/data/PAUSE                  # 所有帳戶停止開新倉（止損照行）
+rm ~/claude_invest_bot-/data/PAUSE                     # 恢復
+touch ~/claude_invest_bot-/data/paper-2x/NO_MONITOR    # 唔再監察某個已經停咗嘅帳戶
+cat ~/claude_invest_bot-/data/monitor/report-$(date +%F).md   # 今日嘅報告
+tail -20 ~/claude_invest_bot-/data/monitor.log         # 監察系統本身嘅 log
+```
+
+如果你已經喺 crontab 停咗某啲帳戶（例如 GMO 嗰幾個），記得喺嗰個 folder 放 `NO_MONITOR`，否則會一直收到「冇更新」警報。
+
+新程式更新之後，漏單檢查要等模擬盤寫咗第一行 `signals.csv` 先開始比較，之前嘅 K 線唔會檢查。
+
+## 12. 停止
 
 - **暫停：** 打 `crontab -e`，喺嗰兩行前面加 `#`。
 - **完全唔用：** 喺 VM instances 撳 **Stop** 或者 **Delete**。停咗機就唔會再收機器嘅錢，但係硬碟仍然會收少少錢，delete 咗就全部唔收。
