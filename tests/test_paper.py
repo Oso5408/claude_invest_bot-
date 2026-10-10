@@ -182,7 +182,7 @@ def test_daily_review_reads_every_account(tmp_path):
     assert "## paper-claude" in r.summary and "## paper-rules" in r.summary and "Claude entry decisions" in r.summary
 
 
-def test_hyperliquid_feed_and_funding(tmp_path, monkeypatch):
+def _hl_run(tmp_path, monkeypatch, advisor=None):
     from btcbot import hyperliquid as hl
     from btcbot.paper import HyperliquidFeed
 
@@ -213,7 +213,23 @@ def test_hyperliquid_feed_and_funding(tmp_path, monkeypatch):
     cfg = PaperConfig(symbol="ADA", history_days=6, allow_short=False, initial_jpy=200)
     out = []
     for t in pd.date_range(m.index[0] + pd.Timedelta(days=3), m.index[-1], freq="1h"):
-        out.append(PaperTrader(tmp_path, cfg, hl.account_config(200)).step(feed, t.to_pydatetime()))
+        out.append(PaperTrader(tmp_path, cfg, hl.account_config(200), advisor=advisor).step(feed, t.to_pydatetime()))
+    return out
+
+
+def test_hyperliquid_feed_and_funding(tmp_path, monkeypatch):
+    out = _hl_run(tmp_path, monkeypatch)
     assert any(o["action"].startswith("long") for o in out)
     state = json.loads((tmp_path / "state.json").read_text())
     assert state["leverage_fees"] > 0  # longs paid the positive funding
+
+
+def test_hyperliquid_with_claude_advisor(tmp_path, monkeypatch):
+    full = _hl_run(tmp_path / "full", monkeypatch)
+    adv = FakeAdvisor("half", 0.5)
+    half = _hl_run(tmp_path / "half", monkeypatch, adv)
+    assert adv.calls and adv.calls[0]["symbol"] == "ADA" and adv.calls[0]["venue"] == "Hyperliquid (USD)"
+    q = lambda out: max(abs(o["qty"]) for o in out)
+    assert 0 < q(half) < q(full)
+    log = pd.read_csv(tmp_path / "half" / "claude.csv")
+    assert (log["action"] == "half").all() and (log["leverage"] <= 1.0).all()
