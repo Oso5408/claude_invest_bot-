@@ -54,6 +54,15 @@ class BreakoutConfig:
     fng_long_max: float = 100
     fng_short_min: float = 0
     fng_short_max: float = 100
+    # Daily trend bias and range room (from the "3R / probability factor" video). Off by default.
+    # daily_sma: price above the N-day SMA of daily closes = longs are with the trend, below = shorts.
+    # against_trend_mult scales the size of a trade against that trend (0 = skip it, 0.5 = half size).
+    daily_sma: int | None = None
+    against_trend_mult: float = 1.0
+    # Skip an entry when today's move already used up this many daily ATRs: for a long,
+    # (close - today's low) / daily ATR(atr_room_period); for a short, (today's high - close) / ATR.
+    atr_room_max: float | None = None
+    atr_room_period: int = 14
 
 
 def align_fng(index: pd.DatetimeIndex, fng: pd.Series) -> pd.Series:
@@ -88,7 +97,42 @@ def compute_features(df: pd.DataFrame, cfg: BreakoutConfig, fng: pd.Series | Non
         v = out["fng"]
         out["long_signal"] &= v.isna() | v.between(cfg.fng_long_min, cfg.fng_long_max)
         out["short_signal"] &= v.isna() | v.between(cfg.fng_short_min, cfg.fng_short_max)
+    if cfg.daily_sma or cfg.atr_room_max is not None:
+        add_daily_context(out, cfg)
     return out
+
+
+def add_daily_context(out: pd.DataFrame, cfg: BreakoutConfig) -> None:
+    """Daily SMA trend side and range room, using only finished UTC days.
+
+    A daily value is stamped on the day after it closed, so a bar never sees today's close.
+    Unknown values (warm-up) block nothing."""
+    day = out.index.floor("D")
+    daily = out[["high", "low", "close"]].groupby(day).agg({"high": "max", "low": "min", "close": "last"})
+    known_from = daily.index + pd.Timedelta(days=1)
+    if cfg.daily_sma:
+        sma = daily["close"].rolling(cfg.daily_sma).mean()
+        sma.index = known_from
+        out["daily_sma"] = sma.reindex(day).to_numpy()
+        trend = np.sign(out["close"] - out["daily_sma"]).fillna(0)
+        out["with_trend_long"] = trend >= 0
+        out["with_trend_short"] = trend <= 0
+        if cfg.against_trend_mult <= 0:
+            out["long_signal"] &= out["with_trend_long"]
+            out["short_signal"] &= out["with_trend_short"]
+    if cfg.atr_room_max is not None:
+        prev = daily["close"].shift()
+        tr = pd.concat([daily["high"] - daily["low"], (daily["high"] - prev).abs(), (daily["low"] - prev).abs()],
+                       axis=1).max(axis=1)
+        datr = tr.ewm(alpha=1 / cfg.atr_room_period, adjust=False, min_periods=cfg.atr_room_period).mean()
+        datr.index = known_from
+        out["daily_atr"] = datr.reindex(day).to_numpy()
+        low_so_far = out["low"].groupby(day).cummin()
+        high_so_far = out["high"].groupby(day).cummax()
+        out["room_used_long"] = (out["close"] - low_so_far) / out["daily_atr"]
+        out["room_used_short"] = (high_so_far - out["close"]) / out["daily_atr"]
+        out["long_signal"] &= ~(out["room_used_long"] > cfg.atr_room_max)
+        out["short_signal"] &= ~(out["room_used_short"] > cfg.atr_room_max)
 
 
 def mtf_config(**overrides) -> BreakoutConfig:
@@ -127,6 +171,8 @@ def run(df: pd.DataFrame, cfg: BreakoutConfig | None = None, acct_cfg: AccountCo
     o, h, l, c = (f[k].to_numpy() for k in ("open", "high", "low", "close"))
     atr = f["atr"].to_numpy()
     long_sig, short_sig = f["long_signal"].to_numpy(), f["short_signal"].to_numpy()
+    if cfg.daily_sma and 0 < cfg.against_trend_mult < 1:
+        with_long, with_short = f["with_trend_long"].to_numpy(), f["with_trend_short"].to_numpy()
     n_roll = rollover_counts(f.index, acct_cfg.rollover_hour_jst)
     fund = funding_per_bar(f.index, funding) if funding is not None else None
 
@@ -220,6 +266,9 @@ def run(df: pd.DataFrame, cfg: BreakoutConfig | None = None, acct_cfg: AccountCo
         elif long_sig[t] or short_sig[t]:
             direction = 1 if long_sig[t] else -1
             lev = min(rc.leverage(), cfg.max_leverage, risk.MAX_LEVERAGE)
+            if cfg.daily_sma and 0 < cfg.against_trend_mult < 1:
+                if not (with_long[t] if direction > 0 else with_short[t]):
+                    lev *= cfg.against_trend_mult
             pending = (direction, direction * lev * equity[t] / c[t], atr[t], c[t])
 
     eq = pd.Series(equity[: t + 1], index=f.index[: t + 1], name="equity")

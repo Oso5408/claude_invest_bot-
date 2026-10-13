@@ -158,3 +158,26 @@ def test_funding_per_bar_sums_hours_and_charges_longs():
     free = run(df, BreakoutConfig(allow_short=False), fng=None, funding=paid * 0)
     cost = run(df, BreakoutConfig(allow_short=False), fng=None, funding=paid)
     assert free.stats["leverage_fees_jpy"] == 0 and cost.stats["leverage_fees_jpy"] > 0
+
+
+def test_daily_sma_uses_finished_days_only():
+    df = random_walk(n=24 * 120, start_price=100.0, seed=3)
+    f = compute_features(df, BreakoutConfig(daily_sma=50, against_trend_mult=0, atr_room_max=1.0))
+    daily = df["close"].groupby(df.index.floor("D")).last()
+    t = df.index[24 * 80 + 5]
+    assert f.loc[t, "daily_sma"] == pytest.approx(daily[daily.index < t.floor("D")].tail(50).mean())
+    # changing today's prices must not change today's daily values
+    later = df.copy()
+    later.loc[t.floor("D"):t.floor("D") + pd.Timedelta("23h"), "close"] *= 1.5
+    g = compute_features(later, BreakoutConfig(daily_sma=50, atr_room_max=1.0))
+    assert g.loc[t, "daily_sma"] == f.loc[t, "daily_sma"]
+    assert g.loc[t, "daily_atr"] == f.loc[t, "daily_atr"]
+
+
+def test_against_trend_skip_blocks_signals():
+    df = random_walk(n=24 * 200, start_price=100.0, seed=4)
+    base = compute_features(df, BreakoutConfig())
+    f = compute_features(df, BreakoutConfig(daily_sma=50, against_trend_mult=0))
+    assert not (f["long_signal"] & (f["close"] < f["daily_sma"])).any()
+    assert not (f["short_signal"] & (f["close"] > f["daily_sma"])).any()
+    assert f["long_signal"].sum() + f["short_signal"].sum() < base["long_signal"].sum() + base["short_signal"].sum()
