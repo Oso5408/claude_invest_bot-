@@ -240,7 +240,7 @@ tail -20 ~/claude_invest_bot-/data/monitor.log         # 監察系統本身嘅 l
 
 Claude 每日 09:00 同 21:00（日本時間）決定一次。佢可以睇 K 線、資金費率、恐懼與貪婪指數、上網搜尋，亦可以睇 Hyperliquid 排行榜上最賺錢嗰批大戶（「大鯊魚」）而家持有乜嘢倉位，再自己決定跟唔跟。每單都要寫低用咩策略同原因。每單平倉之後，Claude 會寫幾句解釋點解贏或者輸。每日 09:35 會寫一份繁體中文日報，有設定 Telegram 就會一齊發去 Telegram。
 
-**費用：** 每次決定估計大約 0.3 至 0.8 美元（要睇 K 線同上網搜尋），一日兩次，加埋日報同每單分析，估計每月大約 20 至 50 美元。實際數字記喺 `decisions.csv` 同日報入面。記得喺 Anthropic Console 嘅 **Limits** 設定每月上限。
+**費用：** 落單決定用 Claude Sonnet 5.5，日報同每單分析用比較平嘅 Claude Haiku 5.5。估計每月大約 8 至 20 美元。實際數字記喺 `decisions.csv` 同日報入面。記得喺 Anthropic Console 嘅 **Limits** 設定每月上限。
 
 **安裝：** 先完成第 9 節（`~/.anthropic_env`），然後：
 

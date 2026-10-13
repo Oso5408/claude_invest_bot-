@@ -37,7 +37,7 @@ import pandas as pd
 import requests
 
 from btcbot import risk
-from btcbot.advisor import MODEL, WEB_SEARCH_TOOL
+from btcbot.advisor import WEB_SEARCH_TOOL
 from btcbot.hyperliquid import MAINNET, TAKER_FEE, _post, parse_candles, parse_funding
 from btcbot.paper import paused
 
@@ -51,8 +51,11 @@ INITIAL_USD = 200.0
 DEFAULT_SLOTS_JST = (9, 21)
 LEADERBOARD_URL = "https://stats-data.hyperliquid.xyz/Mainnet/leaderboard"
 JST = timezone(timedelta(hours=9))
-# Claude Opus 5.5 list prices, for the cost log only
-PRICE_IN, PRICE_OUT, PRICE_SEARCH = 4.0 / 1e6, 20.0 / 1e6, 10.0 / 1000
+DECISION_MODEL = "claude-sonnet-5-5"  # trading decisions
+WRITER_MODEL = "claude-haiku-5-5"  # trade reviews and the daily report
+# list prices (input, output) per token, for the cost log only
+PRICES = {DECISION_MODEL: (2.0 / 1e6, 10.0 / 1e6), WRITER_MODEL: (0.10 / 1e6, 0.50 / 1e6)}
+PRICE_SEARCH = 10.0 / 1000
 
 STRATEGY_NOTES = """Strategies this project already backtested (Hyperliquid or GMO costs, ADA unless noted):
 - 4h Donchian breakout (20-bar high long with 1.2x volume, 10-bar low short, 2x ATR trailing stop): the only
@@ -193,25 +196,29 @@ class HLMarket:
 class Brain:
     """Claude through the Messages API: a tool loop for decisions, plain text for reviews and reports."""
 
-    def __init__(self, model: str = MODEL, client=None):
+    def __init__(self, model: str = DECISION_MODEL, writer_model: str = WRITER_MODEL, client=None):
         if client is None:
             import anthropic
             client = anthropic.Anthropic()
         self.client = client
         self.model = model
+        self.writer_model = writer_model
         self.cost = 0.0  # USD, rough, for the log
 
-    def _create(self, system: str, messages: list, tools: list | None, effort: str):
-        kwargs = dict(model=self.model, max_tokens=16000, system=system, messages=messages,
-                      output_config={"effort": effort},
-                      betas=["server-side-fallback-2026-07-01"], fallbacks="default")
+    def _create(self, system: str, messages: list, tools: list | None, effort: str, model: str | None = None):
+        model = model or self.model
+        kwargs = dict(model=model, max_tokens=16000, system=system, messages=messages,
+                      output_config={"effort": effort})
+        if model != WRITER_MODEL:  # Haiku has no server-side fallback
+            kwargs.update(betas=["server-side-fallback-2026-07-01"], fallbacks="default")
         if tools:
             kwargs["tools"] = tools
         resp = self.client.beta.messages.create(**kwargs)
         u = resp.usage
         searches = getattr(getattr(u, "server_tool_use", None), "web_search_requests", 0) or 0
-        self.cost += (u.input_tokens + (getattr(u, "cache_read_input_tokens", 0) or 0)) * PRICE_IN \
-            + u.output_tokens * PRICE_OUT + searches * PRICE_SEARCH
+        p_in, p_out = PRICES.get(model, PRICES[DECISION_MODEL])
+        self.cost += (u.input_tokens + (getattr(u, "cache_read_input_tokens", 0) or 0)) * p_in \
+            + u.output_tokens * p_out + searches * PRICE_SEARCH
         if resp.stop_reason == "refusal":
             raise RuntimeError("request declined")
         return resp
@@ -245,7 +252,7 @@ class Brain:
         return "(stopped: too many tool rounds)"
 
     def write(self, system: str, text: str) -> str:
-        resp = self._create(system, [{"role": "user", "content": text}], None, "medium")
+        resp = self._create(system, [{"role": "user", "content": text}], None, "medium", self.writer_model)
         return "".join(b.text for b in resp.content if b.type == "text")
 
 

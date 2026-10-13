@@ -156,3 +156,22 @@ def test_brain_tool_loop(tmp_path):
     assert "bought ADA" in st["action"] and len(t.state["positions"]) == 1
     d = pd.read_csv(tmp_path / "decisions.csv")
     assert d["new_trades"].iloc[0] == 1 and d["cost_usd"].iloc[0] > 0
+
+
+def test_models_sonnet_decides_haiku_writes(tmp_path):
+    seen = []
+
+    class Rec(FakeClient):
+        def create(self, **kw):
+            seen.append(kw)
+            if kw["model"] == ai.WRITER_MODEL:
+                usage = SimpleNamespace(input_tokens=100, output_tokens=10, cache_read_input_tokens=0)
+                return SimpleNamespace(stop_reason="end_turn", usage=usage,
+                                       content=[SimpleNamespace(type="text", text="report")])
+            return super().create(**kw)
+
+    brain = ai.Brain(client=Rec())
+    ai.AITrader(tmp_path, FakeMarket(), brain).step(T0)
+    ai.daily_report(tmp_path, brain, T0)
+    assert seen[0]["model"] == "claude-sonnet-5-5" and seen[0]["fallbacks"] == "default"
+    assert seen[-1]["model"] == "claude-haiku-5-5" and "fallbacks" not in seen[-1]
