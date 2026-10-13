@@ -1,0 +1,563 @@
+"""AI-run paper account (fake money): Claude picks its own trades on live Hyperliquid prices.
+
+An experiment next to the rule-based paper accounts, to see whether an AI that chooses its own
+strategy each day does better or worse than the 4h breakout. Unlike btcbot/advisor.py, here Claude
+may open trades by itself. The hard limits below are module constants, checked in code on every
+order, so no prompt or answer from Claude can get around them:
+
+- at most MAX_ENTRIES_PER_DAY new trades per Japan day (00:00-24:00 JST)
+- at most MAX_MARGIN_USD of margin per trade, at most MAX_POSITION_LEVERAGE on that margin
+  (20 USD x 3 = 60 USD position; two of them on a 200 USD account is 0.6x, inside risk.MAX_LEVERAGE)
+- every trade needs a stop loss, no more than MAX_STOP_PCT from the entry (well before liquidation)
+- coins limited to COINS (Hyperliquid perps)
+
+Each `python -m btcbot.ai_trader step` (cron, every 5 minutes):
+1. Checks stop loss / take profit / time limit of open trades against every 1 minute candle since the
+   last run, charges the hourly funding and the taker fee, and asks Claude why a closed trade won or lost.
+2. At each decision time (default 09:00 and 21:00 JST) asks Claude what to do. Claude can look at
+   candles, funding, the Fear & Greed Index, the positions of the top Hyperliquid accounts ("big
+   sharks") and the web, then open or close trades through tools, or do nothing.
+3. Appends to equity.csv; trades.csv holds every closed trade with Claude's reasons and the review.
+
+`python -m btcbot.ai_trader report` (cron, once a day) writes reports/YYYY-MM-DD.md in Traditional
+Chinese, also sent to Telegram when it is set up. A PAUSE file in the folder blocks new trades.
+Needs ANTHROPIC_API_KEY. Nothing here can place a real order.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Final
+
+import pandas as pd
+import requests
+
+from btcbot import risk
+from btcbot.advisor import MODEL, WEB_SEARCH_TOOL
+from btcbot.hyperliquid import MAINNET, TAKER_FEE, _post, parse_candles, parse_funding
+from btcbot.paper import paused
+
+MAX_ENTRIES_PER_DAY: Final[int] = 2
+MAX_MARGIN_USD: Final[float] = 20.0
+MAX_POSITION_LEVERAGE: Final[float] = 3.0
+MAX_STOP_PCT: Final[float] = 0.25
+COINS: Final[tuple[str, ...]] = ("ADA", "BTC", "ETH", "SOL")
+SLIPPAGE = 0.0005
+INITIAL_USD = 200.0
+DEFAULT_SLOTS_JST = (9, 21)
+LEADERBOARD_URL = "https://stats-data.hyperliquid.xyz/Mainnet/leaderboard"
+JST = timezone(timedelta(hours=9))
+# Claude Opus 5.5 list prices, for the cost log only
+PRICE_IN, PRICE_OUT, PRICE_SEARCH = 4.0 / 1e6, 20.0 / 1e6, 10.0 / 1000
+
+STRATEGY_NOTES = """Strategies this project already backtested (Hyperliquid or GMO costs, ADA unless noted):
+- 4h Donchian breakout (20-bar high long with 1.2x volume, 10-bar low short, 2x ATR trailing stop): the only
+  one with a positive result. Hyperliquid 2024-06 to 2026-10, 200 USD: 2x both sides +353% (max drawdown -47%),
+  2x with shorts only when Fear & Greed <= 50 +1,029% (DD -41%), 1x long only +206% (DD -30%). Wins about 40%,
+  profit comes from a few big trend moves; stop is about 3% away.
+- Every intraday strategy lost after costs and had about zero edge even without costs: 3R pullback,
+  opening range reversal, trend pullback (ADA, ETH, BTC on 5m/15m), order-flow momentum, BTC trend + ADA
+  relative strength, z-score mean reversion, grids. Reason: a round trip costs about 0.19% (fees +
+  slippage), so with a 0.5% stop each trade starts about 0.4R behind. Rule of thumb from that work: avoid
+  stops tighter than 1.5% unless the edge is very strong.
+- Fear & Greed: blocking shorts when the index is above 50 helped the breakout; long-side filters hurt."""
+
+TRADER_SYSTEM = f"""You run a small paper-trading account (fake money, a research experiment) on Hyperliquid \
+perpetual futures. Your owner wants to see whether you can choose good trades yourself. Each time you are \
+called you decide what to do now: open a trade, close an open trade, or do nothing. Doing nothing is a \
+normal, often correct answer.
+
+Hard limits, enforced in code (an order outside them is rejected and you get the error back):
+- at most {MAX_ENTRIES_PER_DAY} new trades per Japan day; the context says how many are left today
+- margin at most {MAX_MARGIN_USD:g} USD per trade, leverage at most {MAX_POSITION_LEVERAGE:g}x on that margin
+- every trade needs a stop loss within {MAX_STOP_PCT:.0%} of the entry price
+- coins: {", ".join(COINS)}
+Costs: taker fee {TAKER_FEE:.3%} per side plus about {SLIPPAGE:.2%} slippage per side, hourly funding.
+
+You may use any strategy: one of the strategies below, one you find by searching the web, or copying \
+what the most profitable Hyperliquid accounts are holding (get_whale_positions) if you think that is \
+sound. Name the strategy and give your reason on every order; your owner reads them in the daily report.
+
+{STRATEGY_NOTES}
+
+Use the tools to look at the market before deciding. Do not invent prices. When you are done, call \
+finish once with a one or two sentence summary of what you did and why."""
+
+REVIEW_SYSTEM = """A trade in a paper-trading experiment has just closed. In Traditional Chinese (Hong Kong \
+style), in at most 4 short sentences, explain why it won or lost: was the idea right or wrong, was it the \
+stop placement, timing, costs or funding, or just noise. Be honest; one trade proves little."""
+
+REPORT_SYSTEM = """You write the daily report of an AI-run paper-trading account (fake money) for its owner, \
+who reads Traditional Chinese (Hong Kong style). Plain sentences, under 400 words. Cover: equity now and \
+change since yesterday and since the 200 USD start; every trade closed in the last 24 hours with what \
+strategy it used, the result in USD, and why it won or lost (use the reviews given); open trades; what the \
+AI decided at each decision time and why; the API cost so far. Compare with the rule-based 4h breakout \
+accounts if their numbers are given. Be honest that a few trades prove nothing. Do not recommend \
+real-money trading."""
+
+
+def _tool(name: str, description: str, props: dict, required: list[str] | None = None) -> dict:
+    return {"name": name, "description": description, "strict": True,
+            "input_schema": {"type": "object", "properties": props,
+                             "required": list(props) if required is None else required,
+                             "additionalProperties": False}}
+
+
+COIN = {"type": "string", "enum": list(COINS)}
+TOOLS = [
+    _tool("get_candles", "Recent OHLCV candles of a Hyperliquid perp, oldest first.",
+          {"coin": COIN, "interval": {"type": "string", "enum": ["5m", "15m", "1h", "4h", "1d"]},
+           "bars": {"type": "integer", "description": "how many candles, 10 to 300"}}),
+    _tool("get_funding", "Hourly funding rates of the last 48 hours (positive: longs pay shorts).", {"coin": COIN}),
+    _tool("get_fear_greed", "Crypto Fear & Greed Index (0-100) of the last 14 days.", {}),
+    _tool("get_whale_positions", "Open positions of the most profitable Hyperliquid accounts of the last "
+          "30 days (the leaderboard), biggest positions first.",
+          {"top": {"type": "integer", "description": "how many accounts, 1 to 20"}}),
+    _tool("place_order", "Open a new paper trade at the current price (market order).",
+          {"coin": COIN, "side": {"type": "string", "enum": ["long", "short"]},
+           "margin_usd": {"type": "number", "description": f"at most {MAX_MARGIN_USD:g}"},
+           "leverage": {"type": "number", "description": f"1 to {MAX_POSITION_LEVERAGE:g}"},
+           "stop_price": {"type": "number"},
+           "take_profit_price": {"type": "number", "description": "0 = none"},
+           "max_hold_hours": {"type": "number", "description": "close after this many hours; 0 = no limit"},
+           "strategy": {"type": "string", "description": "short name of the strategy"},
+           "reason": {"type": "string", "description": "why this trade, two or three sentences"}}),
+    _tool("close_position", "Close an open paper trade now at the current price.",
+          {"id": {"type": "integer"}, "reason": {"type": "string"}}),
+    _tool("finish", "Call once at the end.", {"summary": {"type": "string"}}),
+]
+
+
+# ---------- market data ----------
+class HLMarket:
+    """Public Hyperliquid data plus the Fear & Greed Index. No account or key."""
+
+    def __init__(self, url: str = MAINNET, cache_dir: Path | None = None):
+        self.url = url
+        self.cache_dir = cache_dir
+        self.session = requests.Session()
+
+    def mids(self) -> dict[str, float]:
+        return {k: float(v) for k, v in _post(self.url, {"type": "allMids"}, self.session).items() if k in COINS}
+
+    def candles(self, coin: str, interval: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+        rows = _post(self.url, {"type": "candleSnapshot", "req": {
+            "coin": coin, "interval": interval, "startTime": int(start.timestamp() * 1000),
+            "endTime": int(end.timestamp() * 1000)}}, self.session)
+        return parse_candles(rows)
+
+    def funding(self, coin: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.Series:
+        rows = _post(self.url, {"type": "fundingHistory", "coin": coin, "startTime": int(start.timestamp() * 1000),
+                                "endTime": int(end.timestamp() * 1000)}, self.session)
+        return parse_funding(rows)
+
+    def fear_greed(self) -> dict:
+        from btcbot.data import FNG_URL, parse_fng
+        resp = self.session.get(FNG_URL, params={"limit": 14, "format": "json"}, timeout=15)
+        resp.raise_for_status()
+        return {d.strftime("%Y-%m-%d"): v for d, v in parse_fng(resp.json()).items()}
+
+    def leaderboard(self) -> list[dict]:
+        cache = self.cache_dir / "leaderboard.json" if self.cache_dir else None
+        if cache and cache.exists() and time.time() - cache.stat().st_mtime < 12 * 3600:
+            return json.loads(cache.read_text())
+        resp = self.session.get(LEADERBOARD_URL, timeout=60)
+        resp.raise_for_status()
+        rows = []
+        for r in resp.json().get("leaderboardRows", []):
+            perf = {w: p for w, p in r.get("windowPerformances", [])}
+            month = perf.get("month", {})
+            rows.append({"address": r["ethAddress"], "account_value": float(r.get("accountValue", 0)),
+                         "pnl_30d": float(month.get("pnl", 0)), "roi_30d": float(month.get("roi", 0))})
+        rows = sorted((r for r in rows if r["account_value"] >= 100_000), key=lambda r: -r["pnl_30d"])[:50]
+        if cache:
+            cache.write_text(json.dumps(rows))
+        return rows
+
+    def positions(self, address: str) -> list[dict]:
+        st = _post(self.url, {"type": "clearinghouseState", "user": address}, self.session)
+        out = []
+        for ap in st.get("assetPositions", []):
+            p = ap["position"]
+            out.append({"coin": p["coin"], "size": float(p["szi"]), "entry": float(p["entryPx"]),
+                        "value_usd": round(float(p["positionValue"])), "unrealized_pnl": round(float(p["unrealizedPnl"])),
+                        "leverage": p.get("leverage", {}).get("value")})
+        return sorted(out, key=lambda p: -p["value_usd"])
+
+
+# ---------- Claude ----------
+class Brain:
+    """Claude through the Messages API: a tool loop for decisions, plain text for reviews and reports."""
+
+    def __init__(self, model: str = MODEL, client=None):
+        if client is None:
+            import anthropic
+            client = anthropic.Anthropic()
+        self.client = client
+        self.model = model
+        self.cost = 0.0  # USD, rough, for the log
+
+    def _create(self, system: str, messages: list, tools: list | None, effort: str):
+        kwargs = dict(model=self.model, max_tokens=16000, system=system, messages=messages,
+                      output_config={"effort": effort},
+                      betas=["server-side-fallback-2026-07-01"], fallbacks="default")
+        if tools:
+            kwargs["tools"] = tools
+        resp = self.client.beta.messages.create(**kwargs)
+        u = resp.usage
+        searches = getattr(getattr(u, "server_tool_use", None), "web_search_requests", 0) or 0
+        self.cost += (u.input_tokens + (getattr(u, "cache_read_input_tokens", 0) or 0)) * PRICE_IN \
+            + u.output_tokens * PRICE_OUT + searches * PRICE_SEARCH
+        if resp.stop_reason == "refusal":
+            raise RuntimeError("request declined")
+        return resp
+
+    def run(self, context: dict, handlers: dict, max_rounds: int = 15) -> str:
+        """Let Claude call the tools until it calls finish. Returns its summary."""
+        messages = [{"role": "user", "content": "Account and market context (JSON):\n"
+                                                + json.dumps(context, indent=1, default=str)}]
+        for _ in range(max_rounds):
+            resp = self._create(TRADER_SYSTEM, messages, TOOLS + [WEB_SEARCH_TOOL], "medium")
+            messages.append({"role": "assistant", "content": resp.content})
+            if resp.stop_reason == "pause_turn":
+                continue
+            calls = [b for b in resp.content if b.type == "tool_use"]
+            if not calls:
+                return "".join(b.text for b in resp.content if b.type == "text") or "(no summary)"
+            results, summary = [], None
+            for b in calls:
+                if b.name == "finish":
+                    summary = b.input["summary"]
+                    out, err = "ok", False
+                else:
+                    try:
+                        out, err = json.dumps(handlers[b.name](**b.input), default=str), False
+                    except Exception as e:  # the error goes back to Claude, never crashes the run
+                        out, err = f"{type(e).__name__}: {e}", True
+                results.append({"type": "tool_result", "tool_use_id": b.id, "content": out, "is_error": err})
+            if summary is not None:
+                return summary
+            messages.append({"role": "user", "content": results})
+        return "(stopped: too many tool rounds)"
+
+    def write(self, system: str, text: str) -> str:
+        resp = self._create(system, [{"role": "user", "content": text}], None, "medium")
+        return "".join(b.text for b in resp.content if b.type == "text")
+
+
+# ---------- the account ----------
+class AITrader:
+    def __init__(self, folder: Path, market, brain=None, slots_jst: tuple[int, ...] = DEFAULT_SLOTS_JST):
+        self.folder = Path(folder)
+        self.folder.mkdir(parents=True, exist_ok=True)
+        self.market = market
+        self.brain = brain
+        self.slots = tuple(sorted(slots_jst))
+        self.state_path = self.folder / "state.json"
+        self.state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {
+            "cash": INITIAL_USD, "positions": [], "entries": {}, "slots_done": [], "next_id": 1,
+            "last_check": None, "api_cost": 0.0}
+        self.now = datetime.now(timezone.utc)
+        self._mids: dict[str, float] = {}
+
+    def _save(self) -> None:
+        tmp = self.state_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.state, indent=2, default=str))
+        tmp.replace(self.state_path)
+
+    def _append(self, name: str, row: dict) -> None:
+        path = self.folder / name
+        pd.DataFrame([row]).to_csv(path, mode="a", header=not path.exists(), index=False)
+
+    def _day(self) -> str:
+        return self.now.astimezone(JST).strftime("%Y-%m-%d")
+
+    def entries_left(self) -> int:
+        return MAX_ENTRIES_PER_DAY - self.state["entries"].get(self._day(), 0)
+
+    def equity(self, mids: dict[str, float]) -> float:
+        return self.state["cash"] + sum(p["side"] * p["qty"] * (mids.get(p["coin"], p["entry"]) - p["entry"])
+                                        for p in self.state["positions"])
+
+    # ----- orders (the only way a trade opens; every limit is checked here) -----
+    def place_order(self, coin: str, side: str, margin_usd: float, leverage: float, stop_price: float,
+                    take_profit_price: float, max_hold_hours: float, strategy: str, reason: str) -> dict:
+        if paused(self.folder):
+            raise ValueError("PAUSE file present: no new trades")
+        if self.entries_left() <= 0:
+            raise ValueError(f"daily limit reached: {MAX_ENTRIES_PER_DAY} trades today already")
+        if coin not in COINS:
+            raise ValueError(f"coin must be one of {COINS}")
+        if not 0 < margin_usd <= MAX_MARGIN_USD:
+            raise ValueError(f"margin_usd must be above 0 and at most {MAX_MARGIN_USD:g}")
+        if not 1 <= leverage <= MAX_POSITION_LEVERAGE:
+            raise ValueError(f"leverage must be 1 to {MAX_POSITION_LEVERAGE:g}")
+        d = 1 if side == "long" else -1 if side == "short" else 0
+        if not d:
+            raise ValueError("side must be long or short")
+        mid = self._mids.get(coin) or self.market.mids()[coin]
+        px = mid * (1 + d * SLIPPAGE)
+        if d * (px - stop_price) <= 0:
+            raise ValueError(f"stop {stop_price} is on the wrong side of the entry {px:.6g}")
+        if abs(px - stop_price) / px > MAX_STOP_PCT:
+            raise ValueError(f"stop more than {MAX_STOP_PCT:.0%} from the entry {px:.6g}")
+        if take_profit_price and d * (take_profit_price - px) <= 0:
+            raise ValueError(f"take profit {take_profit_price} is on the wrong side of the entry {px:.6g}")
+        notional = margin_usd * leverage
+        eq = self.equity(self._mids or self.market.mids())
+        used = sum(p["qty"] * p["entry"] for p in self.state["positions"])
+        if used + notional > risk.MAX_LEVERAGE * eq:  # account-wide cap from risk.py still holds
+            raise ValueError(f"account would exceed {risk.MAX_LEVERAGE:g}x of equity {eq:.2f}")
+        if sum(p["margin"] for p in self.state["positions"]) + margin_usd > eq:
+            raise ValueError(f"not enough free equity ({eq:.2f} USD)")
+        fee = notional * TAKER_FEE
+        s = self.state
+        pos = {"id": s["next_id"], "coin": coin, "side": d, "qty": notional / px, "entry": px, "margin": margin_usd,
+               "leverage": leverage, "stop": stop_price, "take_profit": take_profit_price or 0.0,
+               "deadline": str(pd.Timestamp(self.now) + pd.Timedelta(hours=max_hold_hours)) if max_hold_hours else None,
+               "opened": str(self.now), "fees": fee, "funding": 0.0, "strategy": strategy, "reason": reason}
+        s["next_id"] += 1
+        s["cash"] -= fee
+        s["positions"].append(pos)
+        s["entries"] = {k: v for k, v in s["entries"].items() if k >= self._day()}
+        s["entries"][self._day()] = s["entries"].get(self._day(), 0) + 1
+        self._save()
+        return {"opened": pos["id"], "entry": round(px, 6), "qty": round(pos["qty"], 6), "fee_usd": round(fee, 4),
+                "trades_left_today": self.entries_left()}
+
+    def close_position(self, id: int, reason: str, px: float | None = None, when=None) -> dict:
+        pos = next((p for p in self.state["positions"] if p["id"] == id), None)
+        if pos is None:
+            raise ValueError(f"no open trade with id {id}")
+        if px is None:
+            px = (self._mids.get(pos["coin"]) or self.market.mids()[pos["coin"]]) * (1 - pos["side"] * SLIPPAGE)
+        fee = pos["qty"] * px * TAKER_FEE
+        gross = pos["side"] * pos["qty"] * (px - pos["entry"])
+        self.state["cash"] += gross - fee
+        self.state["positions"].remove(pos)
+        pnl = gross - pos["fees"] - fee - pos["funding"]
+        row = {"id": id, "coin": pos["coin"], "side": "long" if pos["side"] > 0 else "short",
+               "strategy": pos["strategy"], "opened": pos["opened"], "closed": str(when or self.now),
+               "entry": pos["entry"], "exit": px, "stop": pos["stop"], "take_profit": pos["take_profit"],
+               "margin": pos["margin"], "leverage": pos["leverage"], "pnl_usd": round(pnl, 4),
+               "return_on_margin": round(pnl / pos["margin"], 4), "fees": round(pos["fees"] + fee, 4),
+               "funding": round(pos["funding"], 4), "exit_reason": reason, "entry_reason": pos["reason"]}
+        row["review"] = self._review(row)
+        self._append("trades.csv", row)
+        self._save()
+        return {"closed": id, "exit": round(px, 6), "pnl_usd": row["pnl_usd"]}
+
+    def _review(self, row: dict) -> str:
+        if self.brain is None:
+            return ""
+        try:
+            start = pd.Timestamp(row["opened"]) - pd.Timedelta(hours=12)
+            bars = self.market.candles(row["coin"], "1h", start, pd.Timestamp(self.now))
+            text = json.dumps(row, default=str) + "\n\n1h candles around the trade:\n" + bars.round(6).to_csv()
+            return self.brain.write(REVIEW_SYSTEM, text).strip()
+        except Exception as e:
+            return f"(review failed: {type(e).__name__}: {e})"
+
+    # ----- the 5-minute run -----
+    def _manage(self, last: pd.Timestamp | None) -> list[str]:
+        notes, now = [], pd.Timestamp(self.now)
+        for pos in list(self.state["positions"]):
+            since = max(last, pd.Timestamp(pos["opened"])) if last is not None else pd.Timestamp(pos["opened"])
+            rates = self.market.funding(pos["coin"], since, now)
+            rates = rates[(rates.index > since) & (rates.index <= now)]
+            if len(rates):
+                cost = float(rates.sum()) * pos["side"] * pos["qty"] * self._mids.get(pos["coin"], pos["entry"])
+                pos["funding"] += cost  # positive rate: longs pay
+                self.state["cash"] -= cost
+            bars = self.market.candles(pos["coin"], "1m", since.floor("min"), now)
+            exit_px, why, when = None, None, None
+            for t, b in bars.iterrows():
+                d = pos["side"]
+                if (d > 0 and b["low"] <= pos["stop"]) or (d < 0 and b["high"] >= pos["stop"]):
+                    exit_px = (min(b["open"], pos["stop"]) if d > 0 else max(b["open"], pos["stop"])) * (1 - d * SLIPPAGE)
+                    why, when = "stop_loss", t
+                elif pos["take_profit"] and ((d > 0 and b["high"] >= pos["take_profit"])
+                                             or (d < 0 and b["low"] <= pos["take_profit"])):
+                    exit_px = (max(b["open"], pos["take_profit"]) if d > 0 else min(b["open"], pos["take_profit"])) \
+                        * (1 - d * SLIPPAGE)
+                    why, when = "take_profit", t
+                if why:
+                    break
+            if why is None and pos["deadline"] and now >= pd.Timestamp(pos["deadline"]):
+                why = "time_limit"
+            if why:
+                r = self.close_position(pos["id"], why, exit_px, when)
+                notes.append(f"closed #{pos['id']} {pos['coin']} {why} pnl {r['pnl_usd']:+.2f}")
+        return notes
+
+    def _due_slot(self) -> str | None:
+        """The latest decision time of today that has passed and was not handled yet."""
+        local = self.now.astimezone(JST)
+        passed = [h for h in self.slots if local.hour >= h]
+        if not passed:
+            return None
+        key = f"{self._day()}T{passed[-1]:02d}"
+        return None if key in self.state["slots_done"] else key
+
+    def _context(self, mids: dict) -> dict:
+        trades = self.folder / "trades.csv"
+        last = pd.read_csv(trades).tail(10)[["coin", "side", "strategy", "opened", "closed", "pnl_usd",
+                                             "exit_reason"]].to_dict(orient="records") if trades.exists() else []
+        return {"time_utc": str(self.now), "time_jst": str(self.now.astimezone(JST)),
+                "equity_usd": round(self.equity(mids), 2), "start_usd": INITIAL_USD,
+                "trades_left_today": self.entries_left(), "prices": mids,
+                "open_trades": [{k: p[k] for k in ("id", "coin", "side", "qty", "entry", "stop", "take_profit",
+                                                   "deadline", "opened", "strategy")} for p in self.state["positions"]],
+                "last_10_closed_trades": last}
+
+    def _whales(self, top: int) -> list[dict]:
+        out = []
+        for r in self.market.leaderboard()[:max(1, min(int(top), 20))]:
+            try:
+                pos = self.market.positions(r["address"])[:6]
+            except Exception as e:
+                pos = f"unavailable: {e}"
+            out.append({**r, "positions": pos})
+        return out
+
+    def _handlers(self) -> dict:
+        now = pd.Timestamp(self.now)
+        step = {"5m": "5min", "15m": "15min", "1h": "1h", "4h": "4h", "1d": "1D"}
+
+        def get_candles(coin, interval, bars):
+            n = max(10, min(int(bars), 300))
+            df = self.market.candles(coin, interval, now - n * pd.Timedelta(step[interval]), now)
+            return df.tail(n).round(6).reset_index().astype({"open_time": str}).to_dict(orient="records")
+
+        def get_funding(coin):
+            s = self.market.funding(coin, now - pd.Timedelta(hours=48), now)
+            return {str(t): float(v) for t, v in s.items()}
+
+        return {"get_candles": get_candles, "get_funding": get_funding,
+                "get_fear_greed": lambda: self.market.fear_greed(),
+                "get_whale_positions": self._whales,
+                "place_order": self.place_order,
+                "close_position": lambda id, reason: self.close_position(id, f"ai: {reason}")}
+
+    def step(self, now: datetime | None = None) -> dict:
+        self.now = now or datetime.now(timezone.utc)
+        s = self.state
+        cost_start = self.brain.cost if self.brain is not None else 0.0
+        last = pd.Timestamp(s["last_check"]) if s["last_check"] else None
+        self._mids = self.market.mids()
+        notes = self._manage(last)
+
+        slot = self._due_slot()
+        if slot:
+            s["slots_done"] = [k for k in s["slots_done"] if k >= self._day()] + [slot]
+            self._save()  # a crash mid-decision must not repeat the call on the next run
+            if paused(self.folder):
+                notes.append(f"{slot}: PAUSE file present, no decision")
+            elif self.entries_left() <= 0 and not s["positions"]:
+                notes.append(f"{slot}: daily limit reached, no decision")
+            elif self.brain is None:
+                notes.append(f"{slot}: no Claude, no decision")
+            else:
+                cost0, before = self.brain.cost, s["next_id"]
+                try:
+                    summary, err = self.brain.run(self._context(self._mids), self._handlers()), ""
+                except Exception as e:
+                    summary, err = "", f"{type(e).__name__}: {e}"
+                spent = self.brain.cost - cost0
+                self._append("decisions.csv", {"time": str(self.now), "slot": slot,
+                                               "new_trades": s["next_id"] - before, "summary": summary,
+                                               "error": err, "cost_usd": round(spent, 4)})
+                notes.append(f"{slot}: {summary or err}")
+
+        if self.brain is not None:  # decisions and trade reviews
+            s["api_cost"] = s.get("api_cost", 0.0) + self.brain.cost - cost_start
+        s["last_check"] = str(self.now)
+        self._save()
+        status = {"time": str(self.now), "equity": round(self.equity(self._mids), 2), "cash": round(s["cash"], 2),
+                  "open": len(s["positions"]), "trades_left_today": self.entries_left(),
+                  "action": "; ".join(notes) or "none"}
+        self._append("equity.csv", status)
+        return status
+
+
+# ---------- daily report ----------
+def report_text(folder: Path, now: datetime, data_dir: Path | None = None) -> str:
+    since = pd.Timestamp(now) - pd.Timedelta(days=1)
+    parts = [f"Report time {now.astimezone(JST):%Y-%m-%d %H:%M} JST. Start balance {INITIAL_USD:g} USD."]
+    st = json.loads((folder / "state.json").read_text()) if (folder / "state.json").exists() else {}
+    eq_path, tr_path, dc_path = folder / "equity.csv", folder / "trades.csv", folder / "decisions.csv"
+    if eq_path.exists():
+        eq = pd.read_csv(eq_path, parse_dates=["time"])
+        day = eq[eq["time"] >= since]
+        parts.append(f"Equity now {eq['equity'].iloc[-1]}, 24h ago {day['equity'].iloc[0] if len(day) else 'n/a'}.")
+    parts.append("Open trades: " + json.dumps(st.get("positions", []), default=str))
+    rc = folder / "report_cost.csv"
+    report_cost = pd.read_csv(rc)["cost_usd"].sum() if rc.exists() else 0.0
+    parts.append(f"API cost so far: {st.get('api_cost', 0) + report_cost:.2f} USD.")
+    if tr_path.exists():
+        t = pd.read_csv(tr_path)
+        recent = t[pd.to_datetime(t["closed"], utc=True, format="ISO8601") >= since]
+        parts.append(f"All closed trades: {len(t)}, total pnl {t['pnl_usd'].sum():+.2f} USD, "
+                     f"win rate {(t['pnl_usd'] > 0).mean():.0%}.")
+        parts.append("Trades closed in the last 24h (with the AI's entry reason and review):\n"
+                     + (recent.to_csv(index=False) if len(recent) else "none"))
+    if dc_path.exists():
+        d = pd.read_csv(dc_path)
+        d = d[pd.to_datetime(d["time"], utc=True, format="ISO8601") >= since]
+        parts.append("Decisions in the last 24h:\n" + (d.to_csv(index=False) if len(d) else "none"))
+    if data_dir is not None:
+        for f in sorted(data_dir.glob("paper-hl-*/equity.csv")):
+            e = pd.read_csv(f)
+            if len(e):
+                parts.append(f"Rule-based account {f.parent.name}: equity {e['equity'].iloc[-1]} USD.")
+    return "\n\n".join(parts)
+
+
+def daily_report(folder: Path, brain, now: datetime | None = None, data_dir: Path | None = None) -> Path:
+    now = now or datetime.now(timezone.utc)
+    facts = report_text(folder, now, data_dir)
+    try:
+        cost0 = brain.cost
+        body = brain.write(REPORT_SYSTEM, facts)
+        # own file, so a trader run at the same minute can't overwrite it in state.json
+        pd.DataFrame([{"time": str(now), "cost_usd": round(brain.cost - cost0, 4)}]).to_csv(
+            folder / "report_cost.csv", mode="a", header=not (folder / "report_cost.csv").exists(), index=False)
+    except Exception as e:  # the numbers still get written
+        body = f"(Claude 寫唔到報告：{type(e).__name__}: {e})\n\n{facts}"
+    out = folder / "reports" / f"{now.astimezone(JST):%Y-%m-%d}.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(body)
+    return out
+
+
+def main(argv: list[str] | None = None) -> None:
+    p = argparse.ArgumentParser(description="AI-run paper account on Hyperliquid prices (fake money)")
+    p.add_argument("command", choices=["step", "report", "status"])
+    p.add_argument("--folder", default="data/ai-hl")
+    p.add_argument("--slots", default=",".join(map(str, DEFAULT_SLOTS_JST)),
+                   help="decision hours in Japan time, e.g. 9,21")
+    p.add_argument("--no-claude", action="store_true", help="only manage open trades, never ask Claude")
+    a = p.parse_args(argv)
+    folder = Path(a.folder)
+    market = HLMarket(cache_dir=folder)
+    if a.command == "status":
+        t = AITrader(folder, market)
+        print(json.dumps({**t.state, "equity": round(t.equity(market.mids()), 2)}, indent=2, default=str))
+        return
+    brain = None if a.no_claude else Brain()
+    if a.command == "report":
+        out = daily_report(folder, brain, data_dir=folder.parent)
+        from btcbot import alerts
+        alerts.send(f"🤖 AI 模擬帳戶日報\n\n{out.read_text()}")
+        print(out)
+        return
+    slots = tuple(int(h) for h in a.slots.split(",") if h.strip())
+    print(json.dumps(AITrader(folder, market, brain, slots).step(), default=str))
+
+
+if __name__ == "__main__":
+    main()

@@ -227,7 +227,47 @@ tail -20 ~/claude_invest_bot-/data/monitor.log         # 監察系統本身嘅 l
 
 新程式更新之後，漏單檢查要等模擬盤寫咗第一行 `signals.csv` 先開始比較，之前嘅 K 線唔會檢查。
 
-## 12. 停止
+## 12. AI 自揀策略模擬帳戶（實驗）
+
+呢個帳戶同其他帳戶唔同：唔跟 4h 突破規則，由 Claude 自己揀策略、自己開單（假錢）。目的係同規則帳戶對照，睇 AI 自己揀會好啲定差啲。用 Hyperliquid 真實價格，本金 200 美元。
+
+程式入面鎖死、Claude 改唔到嘅上限：
+
+- 每個日本日最多 2 單新交易
+- 每單保證金最多 20 美元，槓桿最多 3 倍（即每單最大倉位 60 美元；兩單加埋都只係本金嘅 0.6 倍，`risk.py` 嘅 2 倍總上限照用）
+- 每單一定要有止蝕，而且離入場價唔可以多過 25%
+- 只可以交易 ADA、BTC、ETH、SOL
+
+Claude 每日 09:00 同 21:00（日本時間）決定一次。佢可以睇 K 線、資金費率、恐懼與貪婪指數、上網搜尋，亦可以睇 Hyperliquid 排行榜上最賺錢嗰批大戶（「大鯊魚」）而家持有乜嘢倉位，再自己決定跟唔跟。每單都要寫低用咩策略同原因。每單平倉之後，Claude 會寫幾句解釋點解贏或者輸。每日 09:35 會寫一份繁體中文日報，有設定 Telegram 就會一齊發去 Telegram。
+
+**費用：** 每次決定估計大約 0.3 至 0.8 美元（要睇 K 線同上網搜尋），一日兩次，加埋日報同每單分析，估計每月大約 20 至 50 美元。實際數字記喺 `decisions.csv` 同日報入面。記得喺 Anthropic Console 嘅 **Limits** 設定每月上限。
+
+**安裝：** 先完成第 9 節（`~/.anthropic_env`），然後：
+
+```bash
+cd ~/claude_invest_bot- && git pull && .venv/bin/pip install -r requirements.txt
+```
+
+喺 crontab 加兩行（`crontab -e`，加喺最尾）：
+
+```
+*/5 * * * * . $HOME/.anthropic_env; cd $HOME/claude_invest_bot- && .venv/bin/python -m btcbot.ai_trader step --folder data/ai-hl >> data/ai-hl.log 2>&1
+35 0 * * * . $HOME/.anthropic_env; . $HOME/.telegram_env; cd $HOME/claude_invest_bot- && .venv/bin/python -m btcbot.ai_trader report --folder data/ai-hl >> data/ai-hl-report.log 2>&1
+```
+
+**睇結果：**
+
+```bash
+cd ~/claude_invest_bot-
+.venv/bin/python -m btcbot.ai_trader status --folder data/ai-hl   # 而家嘅倉位同本金
+cat data/ai-hl/decisions.csv                                       # 每次決定同原因
+cat data/ai-hl/trades.csv                                          # 每單結果、原因同輸贏分析
+cat data/ai-hl/reports/$(date +%F).md                              # 今日日報
+```
+
+想暫停開新單：`touch data/ai-hl/PAUSE`（已有嘅單照樣會止蝕）。刪咗個檔案就恢復。
+
+## 13. 停止
 
 - **暫停：** 打 `crontab -e`，喺嗰兩行前面加 `#`。
 - **完全唔用：** 喺 VM instances 撳 **Stop** 或者 **Delete**。停咗機就唔會再收機器嘅錢，但係硬碟仍然會收少少錢，delete 咗就全部唔收。
