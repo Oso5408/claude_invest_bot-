@@ -242,7 +242,7 @@ Claude 每日 09:00 同 21:00（日本時間）決定一次。佢可以睇 K 線
 
 每次決定，Claude 一定要睇晒 4 隻幣（每隻都睇 4 小時、1 小時同 15 分鐘 K 線），每隻幣比較幾種策略（順勢突破、區間來回、跟大戶、資金費率或情緒極端等），再對每隻幣講「做多、做空定唔做」同原因，記喺 `decisions.csv` 嘅 `coin_views`。程式亦會自動睇排行榜頭 10 個大戶，比較同上次決定之間佢哋開咗、平咗、加咗、減咗定反手咗乜嘢倉，記喺 `whales.csv`，日報會寫出嚟。每單平倉之後，Claude 會寫幾句解釋點解贏或者輸。每日 09:35 會寫一份繁體中文日報，有設定 Telegram 就會一齊發去 Telegram。
 
-**交易指南（skill）：** Claude 決定時可以用 `read_skill` 打開 4 份交易指南：`regime-detection`（判斷趨勢定上落市）、`exit-strategies`（止蝕、止賺、持倉時間）、`volatility-modeling`（用波幅定止蝕距離）、`copy-trading`（判斷大戶係咪值得跟）。佢哋係由 agiprolabs/claude-trading-skills 固定版本抄入 `btcbot/skills/`，刪走咗 Solana 同 PumpFun 部分，只係文字，唔會行任何 script，亦唔會改變上面嘅硬性限制。每次決定讀咗邊份記喺 `skills.csv`，日報都會寫出嚟。唔使另外安裝任何嘢，`git pull` 就得。
+**交易指南（skill）：** Claude 決定時可以用 `read_skill` 打開 7 份交易指南：`regime-detection`（判斷趨勢定上落市）、`exit-strategies`（止蝕、止賺、持倉時間）、`volatility-modeling`（用波幅定止蝕距離）、`copy-trading`（判斷大戶係咪值得跟）、`correlation-analysis`（4 隻幣幾同步）、`mean-reversion`（均值回歸，我哋回測係蝕）、`cointegration-analysis`（兩隻幣配對交易）。佢哋係由 agiprolabs/claude-trading-skills 固定版本抄入 `btcbot/skills/`，刪走咗 Solana 同 PumpFun 部分，只係文字，唔會行任何 script，亦唔會改變上面嘅硬性限制。每次決定讀咗邊份記喺 `skills.csv`，日報都會寫出嚟。唔使另外安裝任何嘢，`git pull` 就得。
 
 **費用：** 落單決定用 Claude Sonnet 5.5，日報同每單分析用比較平嘅 Claude Haiku 5.5。估計每月大約 8 至 20 美元。實際數字記喺 `decisions.csv` 同日報入面。記得喺 Anthropic Console 嘅 **Limits** 設定每月上限。
 

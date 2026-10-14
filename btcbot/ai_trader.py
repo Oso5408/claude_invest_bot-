@@ -66,6 +66,9 @@ SKILLS: Final[dict[str, str]] = {  # name -> when to read it (shown in the promp
     "exit-strategies": "where to put the stop, take profit and time limit, trailing stops",
     "volatility-modeling": "ATR and realized volatility, how wide a stop should be",
     "copy-trading": "whether a big account's trades are worth following or just luck",
+    "correlation-analysis": "how closely the four coins move together, so two trades are not one doubled bet",
+    "mean-reversion": "testing whether a move is likely to revert (this project's z-score mean reversion lost after costs)",
+    "cointegration-analysis": "pairs trading two coins (needs two orders, so it uses both of the day's trades)",
 }
 
 STRATEGY_NOTES = """Strategies this project already backtested (Hyperliquid or GMO costs, ADA unless noted):
