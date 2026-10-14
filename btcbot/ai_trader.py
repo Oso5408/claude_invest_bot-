@@ -18,7 +18,7 @@ Which guides it read at each decision goes to skills.csv and the daily report.
 Each `python -m btcbot.ai_trader step` (cron, every 5 minutes):
 1. Checks stop loss / take profit / time limit of open trades against every 1 minute candle since the
    last run, charges the hourly funding and the taker fee, and asks Claude why a closed trade won or lost.
-2. At each decision time (default 09:00 and 21:00 JST) asks Claude what to do. Claude can look at
+2. Once an hour (the first run after each full hour) asks Claude what to do. Claude can look at
    candles, funding, the Fear & Greed Index, the positions of the top Hyperliquid accounts ("big
    sharks") and the web, then open or close trades through tools, or do nothing.
 3. Appends to equity.csv; trades.csv holds every closed trade with Claude's reasons and the review.
@@ -52,7 +52,7 @@ MAX_STOP_PCT: Final[float] = 0.25
 COINS: Final[tuple[str, ...]] = ("ADA", "BTC", "ETH", "SOL")
 SLIPPAGE = 0.0005
 INITIAL_USD = 200.0
-DEFAULT_SLOTS_JST = (9, 21)
+DEFAULT_SLOTS_JST = tuple(range(24))  # every hour
 LEADERBOARD_URL = "https://stats-data.hyperliquid.xyz/Mainnet/leaderboard"
 JST = timezone(timedelta(hours=9))
 DECISION_MODEL = "claude-sonnet-5-5"  # trading decisions
@@ -84,8 +84,8 @@ STRATEGY_NOTES = """Strategies this project already backtested (Hyperliquid or G
 - Fear & Greed: blocking shorts when the index is above 50 helped the breakout; long-side filters hurt."""
 
 TRADER_SYSTEM = f"""You run a small paper-trading account (fake money, a research experiment) on Hyperliquid \
-perpetual futures. Your owner wants to see whether you can choose good trades yourself. Each time you are \
-called you decide what to do now: open a trade, close an open trade, or do nothing. Doing nothing is a \
+perpetual futures. Your owner wants to see whether you can choose good trades yourself. You are called once \
+an hour, so there is no need to force a trade: the next look is an hour away. Each time you are called you decide what to do now: open a trade, close an open trade, or do nothing. Doing nothing is a \
 normal, often correct answer.
 
 Hard limits, enforced in code (an order outside them is rejected and you get the error back):
@@ -99,7 +99,10 @@ The point of this account is to be multi-coin, multi-strategy, and to learn from
 accounts do. It must not just repeat the rule-based 4h breakout on ADA (other accounts already do that). \
 Every time you are called, work through all of this before deciding:
 1. Every coin ({", ".join(COINS)}): look at its candles on 4h, 1h and 15m (the bigger trend, the swing and \
-the entry timing) and its funding. The context has a short overview of each to start from. Remember that \
+the entry timing) and its funding. The context has a short overview of each to start from, including \
+indicators already computed in code on 4h, 1h and 15m (EMA 20/50/200, RSI 14, ATR 14, Bollinger Bands, \
+Donchian channels, volume ratio); use these numbers rather than estimating indicators from raw candles, \
+and get_indicators for other timeframes. Remember that \
 a round trip costs about 0.2%, so a 15m setup with a tight stop starts far behind; use 15m mainly to time \
 entries for ideas that also make sense on 1h and 4h.
 2. Several strategy types for each coin, for example trend following / breakout, range or mean reversion, \
@@ -149,6 +152,9 @@ TOOLS = [
     _tool("get_candles", "Recent OHLCV candles of a Hyperliquid perp, oldest first.",
           {"coin": COIN, "interval": {"type": "string", "enum": ["5m", "15m", "1h", "4h", "1d"]},
            "bars": {"type": "integer", "description": "how many candles, 10 to 300"}}),
+    _tool("get_indicators", "EMA 20/50/200, RSI 14, ATR 14, Bollinger Bands (20, 2), Donchian channels and "
+          "volume ratio on the latest completed candle, computed exactly in code.",
+          {"coin": COIN, "interval": {"type": "string", "enum": ["5m", "15m", "1h", "4h", "1d"]}}),
     _tool("get_funding", "Hourly funding rates of the last 48 hours (positive: longs pay shorts).", {"coin": COIN}),
     _tool("get_fear_greed", "Crypto Fear & Greed Index (0-100) of the last 14 days.", {}),
     _tool("get_whale_positions", "Open positions of the most profitable Hyperliquid accounts of the last "
@@ -176,6 +182,48 @@ TOOLS = [
            "whales": {"type": "string", "description": "what the big accounts are doing, two or three sentences"},
            "summary": {"type": "string"}}),
 ]
+
+
+# ---------- indicators ----------
+INTERVAL = {"5m": "5min", "15m": "15min", "1h": "1h", "4h": "4h", "1d": "1D"}
+
+
+def indicators(df: pd.DataFrame) -> dict:
+    """Standard indicators on the latest completed candle, computed in code so Claude never has to
+    work them out from raw numbers. Wilder smoothing for RSI and ATR."""
+    c, h, l, v = df["close"], df["high"], df["low"], df["volume"]
+    if len(c) < 30:
+        return {"error": f"only {len(c)} candles"}
+    ema = {n: c.ewm(span=n, adjust=False).mean() for n in (20, 50, 200)}
+    d = c.diff()
+    gain = d.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
+    loss = (-d.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
+    rsi = (100 - 100 / (1 + gain / loss)).fillna(50.0)  # no losses -> 100, flat -> 50
+    tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1 / 14, adjust=False).mean()
+    mid, sd = c.rolling(20).mean(), c.rolling(20).std()
+    px = float(c.iloc[-1])
+
+    def r(x, n=6):
+        return None if pd.isna(x) else round(float(x), n)
+    out = {"close": px, "candle": str(df.index[-1]),
+           "ema20": r(ema[20].iloc[-1]), "ema50": r(ema[50].iloc[-1]),
+           "ema200": r(ema[200].iloc[-1]) if len(c) >= 200 else None,
+           "rsi14": r(rsi.iloc[-1], 1), "rsi14_prev3": [r(x, 1) for x in rsi.iloc[-4:-1]],
+           "atr14": r(atr.iloc[-1]), "atr14_pct": r(atr.iloc[-1] / px, 4),
+           "bb_upper": r(mid.iloc[-1] + 2 * sd.iloc[-1]), "bb_mid": r(mid.iloc[-1]),
+           "bb_lower": r(mid.iloc[-1] - 2 * sd.iloc[-1]), "bb_width_pct": r(4 * sd.iloc[-1] / mid.iloc[-1], 4),
+           "donchian20_high": r(h.iloc[-21:-1].max()), "donchian20_low": r(l.iloc[-21:-1].min()),
+           "donchian10_low": r(l.iloc[-11:-1].min()),
+           "volume_ratio20": r(v.iloc[-1] / v.iloc[-21:-1].mean(), 2)}
+    out["trend"] = ("up" if px > out["ema20"] > out["ema50"] else
+                    "down" if px < out["ema20"] < out["ema50"] else "mixed")
+    return out
+
+
+def completed(df: pd.DataFrame, interval: str, now: pd.Timestamp) -> pd.DataFrame:
+    """Drop the candle that is still forming."""
+    return df[df.index + pd.Timedelta(INTERVAL[interval]) <= now]
 
 
 # ---------- market data ----------
@@ -475,12 +523,13 @@ class AITrader:
                 "big_accounts": self._whale_watch()}
 
     def _overview(self, mids: dict) -> dict:
-        """Per coin: price changes over 15m / 1h / 4h / 24h / 7d and the latest funding, so every coin gets looked at."""
+        """Per coin: price changes over 15m / 1h / 4h / 24h / 7d, the latest funding and the indicators on
+        4h, 1h and 15m, so every coin gets looked at."""
         now, out = pd.Timestamp(self.now), {}
         for coin in COINS:
             try:
-                c = self.market.candles(coin, "4h", now - pd.Timedelta(days=8), now)["close"]
-                q = self.market.candles(coin, "15m", now - pd.Timedelta(hours=3), now)["close"]
+                frames = {iv: self._indicator_candles(coin, iv) for iv in ("4h", "1h", "15m")}
+                c, q = frames["4h"]["close"], frames["15m"]["close"]
                 px = mids.get(coin, float(c.iloc[-1]))
 
                 def chg(closes, bars):
@@ -489,10 +538,16 @@ class AITrader:
                 out[coin] = {"price": px, "change_15m": chg(q, 1), "change_1h": chg(q, 4), "change_4h": chg(c, 1),
                              "change_24h": chg(c, 6), "change_7d": chg(c, 42),
                              "funding_last": float(f.iloc[-1]) if len(f) else None,
-                             "funding_24h_sum": round(float(f.sum()), 6) if len(f) else None}
+                             "funding_24h_sum": round(float(f.sum()), 6) if len(f) else None,
+                             "indicators": {iv: indicators(completed(df, iv, now)) for iv, df in frames.items()}}
             except Exception as e:
                 out[coin] = f"unavailable: {e}"
         return out
+
+    def _indicator_candles(self, coin: str, interval: str) -> pd.DataFrame:
+        """Enough candles for EMA 200 to settle (about 260)."""
+        now = pd.Timestamp(self.now)
+        return self.market.candles(coin, interval, now - 260 * pd.Timedelta(INTERVAL[interval]), now)
 
     def _whale_watch(self, top: int = 10) -> dict:
         """What the top accounts hold in our coins, and what changed since the last decision."""
@@ -534,11 +589,9 @@ class AITrader:
 
     def _handlers(self) -> dict:
         now = pd.Timestamp(self.now)
-        step = {"5m": "5min", "15m": "15min", "1h": "1h", "4h": "4h", "1d": "1D"}
-
         def get_candles(coin, interval, bars):
             n = max(10, min(int(bars), 300))
-            df = self.market.candles(coin, interval, now - n * pd.Timedelta(step[interval]), now)
+            df = self.market.candles(coin, interval, now - n * pd.Timedelta(INTERVAL[interval]), now)
             return df.tail(n).round(6).reset_index().astype({"open_time": str}).to_dict(orient="records")
 
         def get_funding(coin):
@@ -552,7 +605,10 @@ class AITrader:
                 self._skills_read.append(name)
             return (SKILLS_DIR / f"{name}.md").read_text()
 
-        return {"get_candles": get_candles, "read_skill": read_skill, "get_funding": get_funding,
+        def get_indicators(coin, interval):
+            return indicators(completed(self._indicator_candles(coin, interval), interval, now))
+
+        return {"get_candles": get_candles, "get_indicators": get_indicators, "read_skill": read_skill, "get_funding": get_funding,
                 "get_fear_greed": lambda: self.market.fear_greed(),
                 "get_whale_positions": self._whales,
                 "place_order": self.place_order,
@@ -695,7 +751,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("command", choices=["step", "report", "status"])
     p.add_argument("--folder", default="data/ai-hl")
     p.add_argument("--slots", default=",".join(map(str, DEFAULT_SLOTS_JST)),
-                   help="decision hours in Japan time, e.g. 9,21")
+                   help="decision hours in Japan time, e.g. 9,21 (default: every hour)")
     p.add_argument("--no-claude", action="store_true", help="only manage open trades, never ask Claude")
     a = p.parse_args(argv)
     folder = Path(a.folder)
