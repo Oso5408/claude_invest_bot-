@@ -237,3 +237,12 @@ def test_old_decisions_csv_gets_new_columns(tmp_path):
     d = pd.read_csv(tmp_path / "decisions.csv")
     assert list(d["summary"]) == ["old", "no trade"] and "ETH" in d["coin_views"].iloc[1]
     assert "Decisions in the last 24h" in ai.report_text(tmp_path, T0)
+
+
+def test_default_decides_every_hour(tmp_path):
+    brain = ScriptBrain([])
+    t = ai.AITrader(tmp_path, FakeMarket(), brain)
+    for h in range(3):
+        for m in (2, 7, 12):
+            t.step(T0.replace(hour=h, minute=m))
+    assert brain.calls == 3  # once per hour, not every 5 minutes

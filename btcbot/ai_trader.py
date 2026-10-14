@@ -18,7 +18,7 @@ Which guides it read at each decision goes to skills.csv and the daily report.
 Each `python -m btcbot.ai_trader step` (cron, every 5 minutes):
 1. Checks stop loss / take profit / time limit of open trades against every 1 minute candle since the
    last run, charges the hourly funding and the taker fee, and asks Claude why a closed trade won or lost.
-2. At each decision time (default 09:00 and 21:00 JST) asks Claude what to do. Claude can look at
+2. Once an hour (the first run after each full hour) asks Claude what to do. Claude can look at
    candles, funding, the Fear & Greed Index, the positions of the top Hyperliquid accounts ("big
    sharks") and the web, then open or close trades through tools, or do nothing.
 3. Appends to equity.csv; trades.csv holds every closed trade with Claude's reasons and the review.
@@ -52,7 +52,7 @@ MAX_STOP_PCT: Final[float] = 0.25
 COINS: Final[tuple[str, ...]] = ("ADA", "BTC", "ETH", "SOL")
 SLIPPAGE = 0.0005
 INITIAL_USD = 200.0
-DEFAULT_SLOTS_JST = (9, 21)
+DEFAULT_SLOTS_JST = tuple(range(24))  # every hour
 LEADERBOARD_URL = "https://stats-data.hyperliquid.xyz/Mainnet/leaderboard"
 JST = timezone(timedelta(hours=9))
 DECISION_MODEL = "claude-sonnet-5-5"  # trading decisions
@@ -84,8 +84,8 @@ STRATEGY_NOTES = """Strategies this project already backtested (Hyperliquid or G
 - Fear & Greed: blocking shorts when the index is above 50 helped the breakout; long-side filters hurt."""
 
 TRADER_SYSTEM = f"""You run a small paper-trading account (fake money, a research experiment) on Hyperliquid \
-perpetual futures. Your owner wants to see whether you can choose good trades yourself. Each time you are \
-called you decide what to do now: open a trade, close an open trade, or do nothing. Doing nothing is a \
+perpetual futures. Your owner wants to see whether you can choose good trades yourself. You are called once \
+an hour, so there is no need to force a trade: the next look is an hour away. Each time you are called you decide what to do now: open a trade, close an open trade, or do nothing. Doing nothing is a \
 normal, often correct answer.
 
 Hard limits, enforced in code (an order outside them is rejected and you get the error back):
@@ -695,7 +695,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("command", choices=["step", "report", "status"])
     p.add_argument("--folder", default="data/ai-hl")
     p.add_argument("--slots", default=",".join(map(str, DEFAULT_SLOTS_JST)),
-                   help="decision hours in Japan time, e.g. 9,21")
+                   help="decision hours in Japan time, e.g. 9,21 (default: every hour)")
     p.add_argument("--no-claude", action="store_true", help="only manage open trades, never ask Claude")
     a = p.parse_args(argv)
     folder = Path(a.folder)
