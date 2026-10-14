@@ -246,3 +246,23 @@ def test_default_decides_every_hour(tmp_path):
         for m in (2, 7, 12):
             t.step(T0.replace(hour=h, minute=m))
     assert brain.calls == 3  # once per hour, not every 5 minutes
+
+
+def test_indicators_on_known_series():
+    idx = pd.date_range("2026-01-01", periods=300, freq="1h", tz="UTC")
+    close = pd.Series(range(1, 301), index=idx, dtype=float)  # steady uptrend
+    df = pd.DataFrame({"open": close, "high": close + 1, "low": close - 1, "close": close, "volume": 1.0})
+    ind = ai.indicators(df)
+    assert ind["trend"] == "up" and ind["rsi14"] == 100.0
+    assert ind["ema20"] > ind["ema50"] > ind["ema200"]
+    assert ind["atr14"] == pytest.approx(2.0, abs=0.01)
+    assert ind["donchian20_high"] == 300.0 and ind["volume_ratio20"] == 1.0
+    assert ai.completed(df, "1h", idx[-1] + pd.Timedelta("30min")).index[-1] == idx[-2]
+
+
+def test_overview_has_indicators_per_timeframe(tmp_path):
+    brain = ViewBrain([("get_indicators", {"coin": "BTC", "interval": "1d"})])
+    ai.AITrader(tmp_path, FakeMarket(), brain).step(T0)
+    ov = brain.contexts[0]["market_overview"]["ADA"]["indicators"]
+    assert set(ov) == {"4h", "1h", "15m"}
+    assert "error" in brain.results[0] or "rsi14" in brain.results[0]
