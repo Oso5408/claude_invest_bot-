@@ -84,8 +84,10 @@ Costs: taker fee {TAKER_FEE:.3%} per side plus about {SLIPPAGE:.2%} slippage per
 The point of this account is to be multi-coin, multi-strategy, and to learn from what the big \
 accounts do. It must not just repeat the rule-based 4h breakout on ADA (other accounts already do that). \
 Every time you are called, work through all of this before deciding:
-1. Every coin ({", ".join(COINS)}): look at its candles on at least two timeframes (for example 4h and 1h) \
-and its funding. The context has a short overview of each to start from.
+1. Every coin ({", ".join(COINS)}): look at its candles on 4h, 1h and 15m (the bigger trend, the swing and \
+the entry timing) and its funding. The context has a short overview of each to start from. Remember that \
+a round trip costs about 0.2%, so a 15m setup with a tight stop starts far behind; use 15m mainly to time \
+entries for ideas that also make sense on 1h and 4h.
 2. Several strategy types for each coin, for example trend following / breakout, range or mean reversion, \
 following the big accounts, funding or sentiment extremes, or one you find by searching the web. Pick \
 the one that fits each coin's current market best, or none.
@@ -443,17 +445,19 @@ class AITrader:
                 "big_accounts": self._whale_watch()}
 
     def _overview(self, mids: dict) -> dict:
-        """Per coin: price changes over 4h / 24h / 7d and the latest funding, so every coin gets looked at."""
+        """Per coin: price changes over 15m / 1h / 4h / 24h / 7d and the latest funding, so every coin gets looked at."""
         now, out = pd.Timestamp(self.now), {}
         for coin in COINS:
             try:
                 c = self.market.candles(coin, "4h", now - pd.Timedelta(days=8), now)["close"]
+                q = self.market.candles(coin, "15m", now - pd.Timedelta(hours=3), now)["close"]
                 px = mids.get(coin, float(c.iloc[-1]))
 
-                def chg(bars):
-                    return round(px / float(c.iloc[-1 - bars]) - 1, 4) if len(c) > bars else None
+                def chg(closes, bars):
+                    return round(px / float(closes.iloc[-1 - bars]) - 1, 4) if len(closes) > bars else None
                 f = self.market.funding(coin, now - pd.Timedelta(hours=24), now)
-                out[coin] = {"price": px, "change_4h": chg(1), "change_24h": chg(6), "change_7d": chg(42),
+                out[coin] = {"price": px, "change_15m": chg(q, 1), "change_1h": chg(q, 4), "change_4h": chg(c, 1),
+                             "change_24h": chg(c, 6), "change_7d": chg(c, 42),
                              "funding_last": float(f.iloc[-1]) if len(f) else None,
                              "funding_24h_sum": round(float(f.sum()), 6) if len(f) else None}
             except Exception as e:

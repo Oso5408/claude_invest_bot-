@@ -201,6 +201,7 @@ def test_every_decision_sees_all_coins_and_whale_moves(tmp_path):
     t.step(T0)
     ctx = brain.contexts[0]
     assert set(ctx["market_overview"]) == set(ai.COINS)
+    assert {"change_15m", "change_1h", "change_4h"} <= set(ctx["market_overview"]["ADA"])
     assert ctx["big_accounts"]["our_coins"]["ETH"]["accounts_long"] == 1
     m.positions = lambda address: [{"coin": "ETH", "size": -100.0, "entry": 3000.0, "value_usd": 300000}]
     t.step(T0.replace(hour=12))  # 21:02 JST
