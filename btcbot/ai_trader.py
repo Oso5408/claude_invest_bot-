@@ -11,6 +11,10 @@ order, so no prompt or answer from Claude can get around them:
 - every trade needs a stop loss, no more than MAX_STOP_PCT from the entry (well before liquidation)
 - coins limited to COINS (Hyperliquid perps)
 
+Claude can also read a few trading guides (btcbot/skills/, copied from agiprolabs/claude-trading-skills
+at a fixed commit) with the read_skill tool; they are text only and change none of the limits above.
+Which guides it read at each decision goes to skills.csv and the daily report.
+
 Each `python -m btcbot.ai_trader step` (cron, every 5 minutes):
 1. Checks stop loss / take profit / time limit of open trades against every 1 minute candle since the
    last run, charges the hourly funding and the taker fee, and asks Claude why a closed trade won or lost.
@@ -56,6 +60,13 @@ WRITER_MODEL = "claude-haiku-5-5"  # trade reviews and the daily report
 # list prices (input, output) per token, for the cost log only
 PRICES = {DECISION_MODEL: (2.0 / 1e6, 10.0 / 1e6), WRITER_MODEL: (0.10 / 1e6, 0.50 / 1e6)}
 PRICE_SEARCH = 10.0 / 1000
+SKILLS_DIR = Path(__file__).parent / "skills"
+SKILLS: Final[dict[str, str]] = {  # name -> when to read it (shown in the prompt)
+    "regime-detection": "is a coin trending or ranging now, and which strategy type fits that",
+    "exit-strategies": "where to put the stop, take profit and time limit, trailing stops",
+    "volatility-modeling": "ATR and realized volatility, how wide a stop should be",
+    "copy-trading": "whether a big account's trades are worth following or just luck",
+}
 
 STRATEGY_NOTES = """Strategies this project already backtested (Hyperliquid or GMO costs, ADA unless noted):
 - 4h Donchian breakout (20-bar high long with 1.2x volume, 10-bar low short, 2x ATR trailing stop): the only
@@ -99,6 +110,12 @@ out. Name the strategy and give your reason on every order; your owner reads the
 
 {STRATEGY_NOTES}
 
+Trading guides you can open with read_skill when they help a decision (general crypto guides written \
+for Solana tokens; ignore anything about Solana, PumpFun, DEX liquidity or scripts, and where a guide \
+disagrees with this project's backtest results above, the backtests win):
+{chr(10).join(f"- {k}: {v}" for k, v in SKILLS.items())}
+The guides never change the hard limits. If a guide shaped a trade, say which in the reason.
+
 Do not invent prices. When you are done, call finish once with your view on every coin (even the ones \
 you did not trade), what the big accounts are doing, and a one or two sentence summary."""
 
@@ -111,8 +128,8 @@ who reads Traditional Chinese (Hong Kong style). Plain sentences, under 500 word
 change since yesterday and since the 200 USD start; every trade closed in the last 24 hours with what \
 strategy it used, the result in USD, and why it won or lost (use the reviews given); open trades; what the \
 AI decided at each decision time and why, including its view on each coin (long / short / no trade and \
-which strategy fits) and what the big Hyperliquid accounts were doing (opened, closed, flipped); the API \
-cost so far. Compare with the rule-based 4h breakout \
+which strategy fits) and what the big Hyperliquid accounts were doing (opened, closed, flipped); which \
+trading guides (skills) the AI read at each decision; the API cost so far. Compare with the rule-based 4h breakout \
 accounts if their numbers are given. Be honest that a few trades prove nothing. Do not recommend \
 real-money trading."""
 
@@ -134,6 +151,8 @@ TOOLS = [
     _tool("get_whale_positions", "Open positions of the most profitable Hyperliquid accounts of the last "
           "30 days (the leaderboard), biggest positions first.",
           {"top": {"type": "integer", "description": "how many accounts, 1 to 20"}}),
+    _tool("read_skill", "Read one of the trading guides listed in the instructions (markdown text).",
+          {"name": {"type": "string", "enum": list(SKILLS)}}),
     _tool("place_order", "Open a new paper trade at the current price (market order).",
           {"coin": COIN, "side": {"type": "string", "enum": ["long", "short"]},
            "margin_usd": {"type": "number", "description": f"at most {MAX_MARGIN_USD:g}"},
@@ -291,6 +310,7 @@ class AITrader:
             "last_check": None, "api_cost": 0.0}
         self.now = datetime.now(timezone.utc)
         self._mids: dict[str, float] = {}
+        self._skills_read: list[str] = []
 
     def _save(self) -> None:
         tmp = self.state_path.with_suffix(".tmp")
@@ -515,7 +535,14 @@ class AITrader:
             s = self.market.funding(coin, now - pd.Timedelta(hours=48), now)
             return {str(t): float(v) for t, v in s.items()}
 
-        return {"get_candles": get_candles, "get_funding": get_funding,
+        def read_skill(name):
+            if name not in SKILLS:
+                raise ValueError(f"unknown guide {name}")
+            if name not in self._skills_read:
+                self._skills_read.append(name)
+            return (SKILLS_DIR / f"{name}.md").read_text()
+
+        return {"get_candles": get_candles, "read_skill": read_skill, "get_funding": get_funding,
                 "get_fear_greed": lambda: self.market.fear_greed(),
                 "get_whale_positions": self._whales,
                 "place_order": self.place_order,
@@ -541,6 +568,7 @@ class AITrader:
                 notes.append(f"{slot}: no Claude, no decision")
             else:
                 cost0, before = self.brain.cost, s["next_id"]
+                self._skills_read = []
                 try:
                     out, err = self.brain.run(self._context(self._mids), self._handlers()), ""
                 except Exception as e:
@@ -554,6 +582,9 @@ class AITrader:
                                                "coin_views": json.dumps(out.get("coins", []), ensure_ascii=False),
                                                "whales": out.get("whales", ""),
                                                "error": err, "cost_usd": round(spent, 4)})
+                # own file, so decisions.csv keeps its columns
+                self._append("skills.csv", {"time": str(self.now), "slot": slot,
+                                            "skills_read": ",".join(self._skills_read)})
                 notes.append(f"{slot}: {summary or err}")
 
         if self.brain is not None:  # decisions and trade reviews
@@ -618,6 +649,12 @@ def report_text(folder: Path, now: datetime, data_dir: Path | None = None) -> st
         d = pd.read_csv(dc_path)
         d = d[pd.to_datetime(d["time"], utc=True, format="ISO8601") >= since]
         parts.append("Decisions in the last 24h:\n" + (d.to_csv(index=False) if len(d) else "none"))
+    sk_path = folder / "skills.csv"
+    if sk_path.exists():
+        k = pd.read_csv(sk_path, keep_default_na=False)
+        k = k[pd.to_datetime(k["time"], utc=True, format="ISO8601") >= since]
+        parts.append("Trading guides (skills) the AI read at each decision in the last 24h:\n"
+                     + ("\n".join(f"{r.slot}: {r.skills_read or 'none'}" for r in k.itertuples()) if len(k) else "none"))
     if data_dir is not None:
         for f in sorted(data_dir.glob("paper-hl-*/equity.csv")):
             e = pd.read_csv(f)
