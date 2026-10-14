@@ -267,7 +267,64 @@ cat data/ai-hl/reports/$(date +%F).md                              # 今日日�
 
 想暫停開新單：`touch data/ai-hl/PAUSE`（已有嘅單照樣會止蝕）。刪咗個檔案就恢復。
 
-## 13. 停止
+## 13. Telegram 指令
+
+用返第 11 節嗰個 Watchdog bot，喺 Telegram 打指令就可以睇帳戶同 VM 狀態。所有指令都只係睇，唔會改任何檔案、唔會落單。bot 只會回應 `TELEGRAM_CHAT_ID` 嗰個 chat，其他人打嚟一律唔理，只會記低喺 log。佢主動問 Telegram 有冇新訊息，所以 VM 唔使開任何 port。唔用 Claude API，冇額外費用。
+
+| 指令 | 內容 |
+|---|---|
+| `/balance` | 每個帳戶嘅資金、回報 %、最大回撤 |
+| `/positions` | 而家嘅倉位、入場價、止損、未實現盈虧 |
+| `/trades 5` | 每個帳戶最近幾單（預設 3 單，最多 20） |
+| `/signals` | 每個帳戶最近一支 4h 訊號同結果 |
+| `/health` | 每個帳戶上次運行時間、PAUSE、未解決警報、Hyperliquid API 通唔通 |
+| `/ai` | AI 帳戶最新決定同 Claude 費用 |
+| `/vm` | VM 開機時間、負載、記憶體、硬碟、程式版本 |
+| `/report` | 即刻出一份每日監察報告（要一兩分鐘） |
+| `/help` | 指令清單 |
+
+**1. 更新程式，喺 VM 試行：**
+
+```bash
+cd ~/claude_invest_bot- && git pull
+.venv/bin/python -m btcbot.telegram_bot try /balance
+```
+
+**2. 設定成 systemd 服務**（開機自動行，死咗 10 秒後自動重啟）。成段複製去 VM 貼上：
+
+```bash
+sudo tee /etc/systemd/system/telegram-bot.service > /dev/null <<EOT
+[Unit]
+Description=Telegram commands for the paper accounts
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=$USER
+WorkingDirectory=$HOME/claude_invest_bot-
+ExecStart=/bin/bash -c '. $HOME/.telegram_env && exec .venv/bin/python -m btcbot.telegram_bot run'
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOT
+sudo systemctl daemon-reload
+sudo systemctl enable --now telegram-bot
+```
+
+喺 Telegram 打 `/help`，有回覆就成功。打 `/` 會見到指令選單。
+
+**3. 平時用法：**
+
+```bash
+sudo systemctl status telegram-bot              # 有冇行緊
+sudo journalctl -u telegram-bot -n 50           # 睇 log
+sudo systemctl restart telegram-bot             # git pull 之後要重啟先用到新程式
+sudo systemctl disable --now telegram-bot       # 完全停用
+```
+
+## 14. 停止
 
 - **暫停：** 打 `crontab -e`，喺嗰兩行前面加 `#`。
 - **完全唔用：** 喺 VM instances 撳 **Stop** 或者 **Delete**。停咗機就唔會再收機器嘅錢，但係硬碟仍然會收少少錢，delete 咗就全部唔收。
