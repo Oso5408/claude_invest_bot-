@@ -227,3 +227,13 @@ def test_every_skill_file_exists_and_is_listed():
     tool = next(x for x in ai.TOOLS if x["name"] == "read_skill")
     assert tool["input_schema"]["properties"]["name"]["enum"] == list(ai.SKILLS)
     assert all(k in ai.TRADER_SYSTEM for k in ai.SKILLS)
+
+
+def test_old_decisions_csv_gets_new_columns(tmp_path):
+    # decisions.csv written before coin_views / whales existed
+    pd.DataFrame([{"time": "2026-10-13 12:00:00+00:00", "slot": "2026-10-13T21", "new_trades": 0,
+                   "summary": "old", "error": "", "cost_usd": 0.04}]).to_csv(tmp_path / "decisions.csv", index=False)
+    ai.AITrader(tmp_path, FakeMarket(), ViewBrain([])).step(T0)
+    d = pd.read_csv(tmp_path / "decisions.csv")
+    assert list(d["summary"]) == ["old", "no trade"] and "ETH" in d["coin_views"].iloc[1]
+    assert "Decisions in the last 24h" in ai.report_text(tmp_path, T0)

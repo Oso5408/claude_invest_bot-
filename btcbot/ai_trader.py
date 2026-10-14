@@ -322,7 +322,14 @@ class AITrader:
 
     def _append(self, name: str, row: dict) -> None:
         path = self.folder / name
-        pd.DataFrame([row]).to_csv(path, mode="a", header=not path.exists(), index=False)
+        new = pd.DataFrame([row])
+        if path.exists() and path.stat().st_size:
+            cols = list(pd.read_csv(path, nrows=0).columns)
+            if set(row) - set(cols):  # a newer version added columns: rewrite once under the wider header
+                pd.concat([pd.read_csv(path), new], ignore_index=True).to_csv(path, index=False)
+                return
+            new = new.reindex(columns=cols)  # same columns in the file's order, missing ones empty
+        new.to_csv(path, mode="a", header=not (path.exists() and path.stat().st_size), index=False)
 
     def _day(self) -> str:
         return self.now.astimezone(JST).strftime("%Y-%m-%d")
