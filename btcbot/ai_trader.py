@@ -81,24 +81,36 @@ Hard limits, enforced in code (an order outside them is rejected and you get the
 - coins: {", ".join(COINS)}
 Costs: taker fee {TAKER_FEE:.3%} per side plus about {SLIPPAGE:.2%} slippage per side, hourly funding.
 
-You may use any strategy: one of the strategies below, one you find by searching the web, or copying \
-what the most profitable Hyperliquid accounts are holding (get_whale_positions) if you think that is \
-sound. Name the strategy and give your reason on every order; your owner reads them in the daily report.
+The point of this account is to be multi-coin, multi-strategy, and to learn from what the big \
+accounts do. It must not just repeat the rule-based 4h breakout on ADA (other accounts already do that). \
+Every time you are called, work through all of this before deciding:
+1. Every coin ({", ".join(COINS)}): look at its candles on at least two timeframes (for example 4h and 1h) \
+and its funding. The context has a short overview of each to start from.
+2. Several strategy types for each coin, for example trend following / breakout, range or mean reversion, \
+following the big accounts, funding or sentiment extremes, or one you find by searching the web. Pick \
+the one that fits each coin's current market best, or none.
+3. The big accounts: the context has what the most profitable Hyperliquid accounts hold now and what they \
+changed since your last decision (opened, closed, added, cut, flipped). Say what they seem to be doing and \
+whether it is worth following; they can be hedging or just lucky. get_whale_positions shows more detail.
+Then open a trade only where you see a real edge after costs; doing nothing is fine when nothing stands \
+out. Name the strategy and give your reason on every order; your owner reads them in the daily report.
 
 {STRATEGY_NOTES}
 
-Use the tools to look at the market before deciding. Do not invent prices. When you are done, call \
-finish once with a one or two sentence summary of what you did and why."""
+Do not invent prices. When you are done, call finish once with your view on every coin (even the ones \
+you did not trade), what the big accounts are doing, and a one or two sentence summary."""
 
 REVIEW_SYSTEM = """A trade in a paper-trading experiment has just closed. In Traditional Chinese (Hong Kong \
 style), in at most 4 short sentences, explain why it won or lost: was the idea right or wrong, was it the \
 stop placement, timing, costs or funding, or just noise. Be honest; one trade proves little."""
 
 REPORT_SYSTEM = """You write the daily report of an AI-run paper-trading account (fake money) for its owner, \
-who reads Traditional Chinese (Hong Kong style). Plain sentences, under 400 words. Cover: equity now and \
+who reads Traditional Chinese (Hong Kong style). Plain sentences, under 500 words. Cover: equity now and \
 change since yesterday and since the 200 USD start; every trade closed in the last 24 hours with what \
 strategy it used, the result in USD, and why it won or lost (use the reviews given); open trades; what the \
-AI decided at each decision time and why; the API cost so far. Compare with the rule-based 4h breakout \
+AI decided at each decision time and why, including its view on each coin (long / short / no trade and \
+which strategy fits) and what the big Hyperliquid accounts were doing (opened, closed, flipped); the API \
+cost so far. Compare with the rule-based 4h breakout \
 accounts if their numbers are given. Be honest that a few trades prove nothing. Do not recommend \
 real-money trading."""
 
@@ -131,7 +143,14 @@ TOOLS = [
            "reason": {"type": "string", "description": "why this trade, two or three sentences"}}),
     _tool("close_position", "Close an open paper trade now at the current price.",
           {"id": {"type": "integer"}, "reason": {"type": "string"}}),
-    _tool("finish", "Call once at the end.", {"summary": {"type": "string"}}),
+    _tool("finish", "Call once at the end, with your view on every coin.",
+          {"coins": {"type": "array", "items": {
+              "type": "object", "additionalProperties": False, "required": ["coin", "view", "strategy", "reason"],
+              "properties": {"coin": COIN, "view": {"type": "string", "enum": ["long", "short", "no trade"]},
+                             "strategy": {"type": "string", "description": "the strategy that fits best now"},
+                             "reason": {"type": "string", "description": "one or two sentences"}}}},
+           "whales": {"type": "string", "description": "what the big accounts are doing, two or three sentences"},
+           "summary": {"type": "string"}}),
 ]
 
 
@@ -223,8 +242,8 @@ class Brain:
             raise RuntimeError("request declined")
         return resp
 
-    def run(self, context: dict, handlers: dict, max_rounds: int = 15) -> str:
-        """Let Claude call the tools until it calls finish. Returns its summary."""
+    def run(self, context: dict, handlers: dict, max_rounds: int = 20) -> dict:
+        """Let Claude call the tools until it calls finish. Returns the finish input (coin views, whales, summary)."""
         messages = [{"role": "user", "content": "Account and market context (JSON):\n"
                                                 + json.dumps(context, indent=1, default=str)}]
         for _ in range(max_rounds):
@@ -234,11 +253,11 @@ class Brain:
                 continue
             calls = [b for b in resp.content if b.type == "tool_use"]
             if not calls:
-                return "".join(b.text for b in resp.content if b.type == "text") or "(no summary)"
+                return {"summary": "".join(b.text for b in resp.content if b.type == "text") or "(no summary)"}
             results, summary = [], None
             for b in calls:
                 if b.name == "finish":
-                    summary = b.input["summary"]
+                    summary = dict(b.input)
                     out, err = "ok", False
                 else:
                     try:
@@ -249,7 +268,7 @@ class Brain:
             if summary is not None:
                 return summary
             messages.append({"role": "user", "content": results})
-        return "(stopped: too many tool rounds)"
+        return {"summary": "(stopped: too many tool rounds)"}
 
     def write(self, system: str, text: str) -> str:
         resp = self._create(system, [{"role": "user", "content": text}], None, "medium", self.writer_model)
@@ -419,13 +438,61 @@ class AITrader:
                 "trades_left_today": self.entries_left(), "prices": mids,
                 "open_trades": [{k: p[k] for k in ("id", "coin", "side", "qty", "entry", "stop", "take_profit",
                                                    "deadline", "opened", "strategy")} for p in self.state["positions"]],
-                "last_10_closed_trades": last}
+                "last_10_closed_trades": last,
+                "market_overview": self._overview(mids),
+                "big_accounts": self._whale_watch()}
 
-    def _whales(self, top: int) -> list[dict]:
+    def _overview(self, mids: dict) -> dict:
+        """Per coin: price changes over 4h / 24h / 7d and the latest funding, so every coin gets looked at."""
+        now, out = pd.Timestamp(self.now), {}
+        for coin in COINS:
+            try:
+                c = self.market.candles(coin, "4h", now - pd.Timedelta(days=8), now)["close"]
+                px = mids.get(coin, float(c.iloc[-1]))
+
+                def chg(bars):
+                    return round(px / float(c.iloc[-1 - bars]) - 1, 4) if len(c) > bars else None
+                f = self.market.funding(coin, now - pd.Timedelta(hours=24), now)
+                out[coin] = {"price": px, "change_4h": chg(1), "change_24h": chg(6), "change_7d": chg(42),
+                             "funding_last": float(f.iloc[-1]) if len(f) else None,
+                             "funding_24h_sum": round(float(f.sum()), 6) if len(f) else None}
+            except Exception as e:
+                out[coin] = f"unavailable: {e}"
+        return out
+
+    def _whale_watch(self, top: int = 10) -> dict:
+        """What the top accounts hold in our coins, and what changed since the last decision."""
+        try:
+            accounts = self._whales(top, keep=None)  # all positions, so a small one isn't read as closed
+        except Exception as e:
+            return {"error": f"{type(e).__name__}: {e}"}
+        snap, prices = {}, dict(self._mids)
+        for a in accounts:
+            if isinstance(a["positions"], list):
+                snap[a["address"]] = {p["coin"]: p["size"] for p in a["positions"]}
+                for p in a["positions"]:
+                    if p["size"]:
+                        prices.setdefault(p["coin"], p["value_usd"] / abs(p["size"]))
+        totals = {}
+        for coin in COINS:
+            sizes = [v[coin] for v in snap.values() if coin in v]
+            px = self._mids.get(coin, 0.0)
+            totals[coin] = {"accounts_long": sum(x > 0 for x in sizes), "accounts_short": sum(x < 0 for x in sizes),
+                            "net_usd": round(sum(sizes) * px)}
+        changes = whale_changes(self.state.get("whale_snapshot", {}), snap, prices)
+        self.state["whale_snapshot"] = snap
+        self._append("whales.csv", {"time": str(self.now), "totals": json.dumps(totals),
+                                    "changes": json.dumps(changes[:20])})
+        return {"our_coins": totals, "changes_since_last_decision": changes[:20],
+                "accounts": [{k: a[k] for k in ("address", "account_value", "pnl_30d", "roi_30d")}
+                             | {"biggest_positions": a["positions"][:4] if isinstance(a["positions"], list)
+                                else a["positions"]} for a in accounts]}
+
+    def _whales(self, top: int, keep: int | None = 6) -> list[dict]:
         out = []
         for r in self.market.leaderboard()[:max(1, min(int(top), 20))]:
             try:
-                pos = self.market.positions(r["address"])[:6]
+                pos = self.market.positions(r["address"])[:keep]
             except Exception as e:
                 pos = f"unavailable: {e}"
             out.append({**r, "positions": pos})
@@ -471,12 +538,17 @@ class AITrader:
             else:
                 cost0, before = self.brain.cost, s["next_id"]
                 try:
-                    summary, err = self.brain.run(self._context(self._mids), self._handlers()), ""
+                    out, err = self.brain.run(self._context(self._mids), self._handlers()), ""
                 except Exception as e:
-                    summary, err = "", f"{type(e).__name__}: {e}"
+                    out, err = {}, f"{type(e).__name__}: {e}"
+                if isinstance(out, str):
+                    out = {"summary": out}
+                summary = out.get("summary", "")
                 spent = self.brain.cost - cost0
                 self._append("decisions.csv", {"time": str(self.now), "slot": slot,
                                                "new_trades": s["next_id"] - before, "summary": summary,
+                                               "coin_views": json.dumps(out.get("coins", []), ensure_ascii=False),
+                                               "whales": out.get("whales", ""),
                                                "error": err, "cost_usd": round(spent, 4)})
                 notes.append(f"{slot}: {summary or err}")
 
@@ -489,6 +561,32 @@ class AITrader:
                   "action": "; ".join(notes) or "none"}
         self._append("equity.csv", status)
         return status
+
+
+def whale_changes(old: dict, new: dict, prices: dict, min_usd: float = 10_000) -> list[dict]:
+    """Positions the top accounts opened, closed, added to, cut or flipped between two snapshots,
+    biggest first. Accounts missing from either snapshot are skipped (left or joined the top list)."""
+    out = []
+    for addr in set(old) & set(new):
+        for coin in set(old[addr]) | set(new[addr]):
+            a, b = old[addr].get(coin, 0.0), new[addr].get(coin, 0.0)
+            if a == b:
+                continue
+            px = prices.get(coin)
+            usd = abs(b - a) * px if px else None
+            if usd is not None and usd < min_usd:
+                continue
+            if a == 0:
+                what = "opened long" if b > 0 else "opened short"
+            elif b == 0:
+                what = "closed long" if a > 0 else "closed short"
+            elif a * b < 0:
+                what = "flipped to long" if b > 0 else "flipped to short"
+            else:
+                what = "added" if abs(b) > abs(a) else "cut"
+            out.append({"account": addr[:10], "coin": coin, "change": what, "size_before": a, "size_now": b,
+                        "change_usd": round(usd) if usd is not None else None})
+    return sorted(out, key=lambda r: -(r["change_usd"] or 0))
 
 
 # ---------- daily report ----------

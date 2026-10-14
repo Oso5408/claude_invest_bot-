@@ -175,3 +175,36 @@ def test_models_sonnet_decides_haiku_writes(tmp_path):
     ai.daily_report(tmp_path, brain, T0)
     assert seen[0]["model"] == "claude-sonnet-5-5" and seen[0]["fallbacks"] == "default"
     assert seen[-1]["model"] == "claude-haiku-5-5" and "fallbacks" not in seen[-1]
+
+
+def test_whale_changes():
+    old = {"0xa": {"ETH": 100.0, "BTC": 1.0}, "0xb": {"SOL": 50.0}}
+    new = {"0xa": {"ETH": -100.0, "BTC": 2.0, "ADA": 50_000.0}, "0xc": {"SOL": 9.0}}
+    ch = ai.whale_changes(old, new, {"ETH": 3000.0, "BTC": 60000.0, "ADA": 1.0})
+    what = {(c["coin"], c["change"]) for c in ch}
+    assert what == {("ETH", "flipped to short"), ("BTC", "added"), ("ADA", "opened long")}
+    assert ch[0]["coin"] == "ETH"  # biggest change first; 0xb/0xc left or joined the list, skipped
+
+
+class ViewBrain(ScriptBrain):
+    def run(self, context, handlers):
+        self.contexts = getattr(self, "contexts", []) + [context]
+        super().run(context, handlers)
+        return {"coins": [{"coin": c, "view": "no trade", "strategy": "range", "reason": "flat"} for c in ai.COINS],
+                "whales": "big accounts flipped ETH short", "summary": "no trade"}
+
+
+def test_every_decision_sees_all_coins_and_whale_moves(tmp_path):
+    m = FakeMarket()
+    brain = ViewBrain([])
+    t = ai.AITrader(tmp_path, m, brain)
+    t.step(T0)
+    ctx = brain.contexts[0]
+    assert set(ctx["market_overview"]) == set(ai.COINS)
+    assert ctx["big_accounts"]["our_coins"]["ETH"]["accounts_long"] == 1
+    m.positions = lambda address: [{"coin": "ETH", "size": -100.0, "entry": 3000.0, "value_usd": 300000}]
+    t.step(T0.replace(hour=12))  # 21:02 JST
+    assert brain.contexts[1]["big_accounts"]["changes_since_last_decision"][0]["change"] == "flipped to short"
+    d = pd.read_csv(tmp_path / "decisions.csv")
+    assert len(d) == 2 and "ETH" in d["coin_views"].iloc[0] and d["whales"].iloc[1].startswith("big accounts")
+    assert len(pd.read_csv(tmp_path / "whales.csv")) == 2
