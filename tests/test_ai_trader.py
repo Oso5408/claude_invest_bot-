@@ -209,3 +209,21 @@ def test_every_decision_sees_all_coins_and_whale_moves(tmp_path):
     d = pd.read_csv(tmp_path / "decisions.csv")
     assert len(d) == 2 and "ETH" in d["coin_views"].iloc[0] and d["whales"].iloc[1].startswith("big accounts")
     assert len(pd.read_csv(tmp_path / "whales.csv")) == 2
+
+
+def test_read_skill_is_logged_and_reported(tmp_path):
+    brain = ScriptBrain([("read_skill", {"name": "exit-strategies"}), ("read_skill", {"name": "exit-strategies"}),
+                         ("read_skill", {"name": "../state"})])
+    t = ai.AITrader(tmp_path, FakeMarket(), brain)
+    t.step(T0)
+    assert "# Exit Strategies" in brain.results[0] and isinstance(brain.results[2], ValueError)
+    assert pd.read_csv(tmp_path / "skills.csv")["skills_read"].iloc[0] == "exit-strategies"
+    assert "09: exit-strategies" in ai.report_text(tmp_path, T0)
+
+
+def test_every_skill_file_exists_and_is_listed():
+    files = {p.stem for p in ai.SKILLS_DIR.glob("*.md")}
+    assert files == set(ai.SKILLS)
+    tool = next(x for x in ai.TOOLS if x["name"] == "read_skill")
+    assert tool["input_schema"]["properties"]["name"]["enum"] == list(ai.SKILLS)
+    assert all(k in ai.TRADER_SYSTEM for k in ai.SKILLS)
