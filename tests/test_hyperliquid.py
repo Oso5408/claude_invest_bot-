@@ -22,3 +22,28 @@ def test_hyperliquid_account_runs_in_usd():
     funding = pd.Series(0.0005, index=pd.date_range(df.index[0], df.index[-1], freq="1h"))
     res = run(df, BreakoutConfig(), account_config(200), funding=funding)
     assert len(res.trades) > 0 and res.stats["leverage_fees_jpy"] != 0
+
+
+def test_post_waits_and_retries_on_rate_limit(monkeypatch):
+    from btcbot import hyperliquid as hl
+
+    class Resp:
+        def __init__(self, code):
+            self.status_code = code
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(self.status_code)
+
+        def json(self):
+            return {"ADA": "0.5"}
+
+    codes, sleeps = [429, 429, 200], []
+
+    class Session:
+        def post(self, url, json=None, timeout=None):
+            return Resp(codes.pop(0))
+
+    monkeypatch.setattr(hl.time, "sleep", sleeps.append)
+    assert hl._post(hl.MAINNET, {"type": "allMids"}, Session()) == {"ADA": "0.5"}
+    assert sleeps == [2.0, 4.0]
