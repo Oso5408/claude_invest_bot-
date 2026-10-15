@@ -5,3 +5,4 @@ __pycache__/
 .env
 data/paper*
 data/monitor*
+data/hl-traders/
