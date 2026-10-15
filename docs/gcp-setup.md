@@ -236,7 +236,7 @@ tail -20 ~/claude_invest_bot-/data/monitor.log         # 監察系統本身嘅 l
 - 每個日本日最多 2 單新交易
 - 每單保證金最多 20 美元，槓桿最多 3 倍（即每單最大倉位 60 美元；兩單加埋都只係本金嘅 0.6 倍，`risk.py` 嘅 2 倍總上限照用）
 - 每單一定要有止蝕，而且離入場價唔可以多過 25%
-- 只可以交易 ADA、BTC、ETH、SOL
+- 只可以交易 ADA、BTC、ETH、SOL、HYPE、NEAR
 
 Claude 每個鐘決定一次（一日 24 次）。佢可以睇 K 線、資金費率、恐懼與貪婪指數、上網搜尋，亦可以睇 Hyperliquid 排行榜上最賺錢嗰批大戶（「大鯊魚」）而家持有乜嘢倉位，再自己決定跟唔跟。每單都要寫低用咩策略同原因。
 
@@ -259,7 +259,7 @@ cd ~/claude_invest_bot- && git pull && .venv/bin/pip install -r requirements.txt
 35 0 * * * . $HOME/.anthropic_env; . $HOME/.telegram_env; cd $HOME/claude_invest_bot- && .venv/bin/python -m btcbot.ai_trader report --folder data/ai-hl >> data/ai-hl-report.log 2>&1
 ```
 
-**AI 睇邊啲大戶：** 每日掃一次成個 Hyperliquid 排行榜，揀出穩定賺錢、而且喺 ADA/BTC/ETH/SOL 有實際已實現盈利嘅交易員（本週、本月、歷來都賺；唔係一星期內賺晒；30 日內喺呢四隻幣最少 20 單、佔佢成交兩成以上），按「呢四隻幣賺嘅錢 ÷ 本金」排，頭 20 個寫入 `data/hl-traders/latest.json`，AI 就睇呢班人。檔案超過 48 小時未更新，AI 會自動退返用排行榜 30 日最賺嘅帳戶。唔使 Claude 錢，每次大約 3 分鐘。喺 crontab 再加一行（每日日本時間 06:00）：
+**AI 睇邊啲大戶：** 每日掃一次成個 Hyperliquid 排行榜，揀出穩定賺錢、而且喺 ADA/BTC/ETH/SOL/HYPE/NEAR 有實際已實現盈利嘅交易員（本週、本月、歷來都賺；唔係一星期內賺晒；30 日內喺呢六隻幣最少 20 單、佔佢成交兩成以上），按「呢六隻幣賺嘅錢 ÷ 本金」排，頭 20 個寫入 `data/hl-traders/latest.json`，AI 就睇呢班人。檔案超過 48 小時未更新，AI 會自動退返用排行榜 30 日最賺嘅帳戶。唔使 Claude 錢，每次大約 3 分鐘。喺 crontab 再加一行（每日日本時間 06:00）：
 
 ```
 0 21 * * * cd $HOME/claude_invest_bot- && .venv/bin/python -m btcbot.hl_traders >> data/hl-traders.log 2>&1
@@ -295,13 +295,13 @@ cd ~/claude_invest_bot- && . $HOME/.anthropic_env && .venv/bin/python -m btcbot.
 
 用假市況試兩次：SOL 4h 帶量突破（做多），同埋 ETH 4h 帶量跌穿而恐懼貪婪指數 75（做空）。每次問 Claude 一次（大約 0.05 美元），之後將價格推到止賺或者止蝕，睇 5 分鐘檢查會唔會平倉。喺臨時資料夾行，唔會掂到 data/ai-hl。加 `--no-claude` 就用固定指令代替 Claude，唔使錢，只試程式。
 
-**Hyperliquid API 自我測試**（bot 用到嘅每個 Hyperliquid API 有冇回應、格式啱唔啱、最新 K 線同資金費率夠唔夠新、ADA/BTC/ETH/SOL 價格合理唔合理、每個 call 幾多 ms）：
+**Hyperliquid API 自我測試**（bot 用到嘅每個 Hyperliquid API 有冇回應、格式啱唔啱、最新 K 線同資金費率夠唔夠新、ADA/BTC/ETH/SOL/HYPE/NEAR 價格合理唔合理、每個 call 幾多 ms）：
 
 ```bash
 cd ~/claude_invest_bot- && .venv/bin/python -m btcbot.hl_selftest
 ```
 
-只讀公開數據，唔使 key、唔會落單、唔會寫任何檔案。13 項檢查（allMids、Telegram /health、四隻幣嘅 15m/1h/4h K 線同資金費率、規則帳戶用嘅 1m/1h K 線同 l2Book、大戶排行榜同頭 3 個大戶倉位），最後一行 `ALL OK` 就代表全部正常；`FAIL` 嗰行會寫低咩出事。
+只讀公開數據，唔使 key、唔會落單、唔會寫任何檔案。17 項檢查（allMids、Telegram /health、六隻幣嘅 15m/1h/4h K 線同資金費率、規則帳戶用嘅 1m/1h K 線同 l2Book、大戶排行榜同頭 3 個大戶倉位），最後一行 `ALL OK` 就代表全部正常；`FAIL` 嗰行會寫低咩出事。
 
 ## 13. Telegram 指令
 

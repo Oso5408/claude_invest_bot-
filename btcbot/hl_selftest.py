@@ -1,6 +1,6 @@
 """Self-test of every Hyperliquid API call the bot makes, through the bot's own code: does each endpoint
 answer, is the data in the shape the code expects, is the latest candle / funding fresh, are the prices sane
-for ADA, BTC, ETH and SOL, and how long each call takes.
+for ADA, BTC, ETH, SOL, HYPE and NEAR, and how long each call takes.
 
 What is checked (read-only public data, no key, no account, no orders):
 - allMids                  AI account prices, Telegram /health
@@ -26,7 +26,8 @@ from btcbot.ai_trader import COINS, HLMarket
 from btcbot.paper import HyperliquidFeed
 
 # Wide bands: only catches broken units / wrong coin / zero prices, not market moves.
-PRICE_RANGE = {"ADA": (0.05, 20.0), "BTC": (5_000.0, 1_000_000.0), "ETH": (100.0, 100_000.0), "SOL": (1.0, 5_000.0)}
+PRICE_RANGE = {"ADA": (0.05, 20.0), "BTC": (5_000.0, 1_000_000.0), "ETH": (100.0, 100_000.0), "SOL": (1.0, 5_000.0),
+               "HYPE": (0.5, 2_000.0), "NEAR": (0.05, 500.0)}
 MAX_FUNDING_PER_HOUR = 0.005  # 0.5%/h; Hyperliquid caps hourly funding at 4%, normal is ~0.00125%
 MAX_SPREAD = 0.005
 MAX_MID_GAP = 0.03  # last 1m close vs allMids

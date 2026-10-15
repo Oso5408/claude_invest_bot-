@@ -9,7 +9,7 @@ import requests
 from btcbot import hl_selftest as hs
 
 NOW = datetime(2026, 10, 15, 12, 7, tzinfo=timezone.utc)
-PRICES = {"ADA": 0.62, "BTC": 67_000.0, "ETH": 2_600.0, "SOL": 150.0, "DOGE": 0.12}
+PRICES = {"ADA": 0.62, "BTC": 67_000.0, "ETH": 2_600.0, "SOL": 150.0, "HYPE": 40.0, "NEAR": 2.5, "DOGE": 0.12}
 STEP_MS = {"1m": 60_000, "15m": 900_000, "1h": 3_600_000, "4h": 14_400_000}
 WHALE = "0x" + "ab" * 20
 
@@ -116,8 +116,8 @@ def run():
 
 def test_all_endpoints_pass_on_healthy_api(fake_hl):
     res = run()
-    assert len(res) == 13 and all(r["ok"] for r in res.values()), [r for r in res.values() if not r["ok"]]
-    assert res["allMids (AI prices)"]["detail"] == {c: PRICES[c] for c in ("ADA", "BTC", "ETH", "SOL")}
+    assert len(res) == 17 and all(r["ok"] for r in res.values()), [r for r in res.values() if not r["ok"]]
+    assert res["allMids (AI prices)"]["detail"] == {c: PRICES[c] for c in ("ADA", "BTC", "ETH", "SOL", "HYPE", "NEAR")}
     assert res["leaderboard (stats-data.hyperliquid.xyz)"]["detail"]["accounts"] == 30
     assert res["clearinghouseState top 3 whales"]["detail"][0]["biggest"] == "BTC"
 

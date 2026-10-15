@@ -25,7 +25,7 @@ import pandas as pd
 
 from btcbot import ai_trader as ai
 
-DEFAULT_PRICES = {"ADA": 0.6, "BTC": 60000.0, "ETH": 3000.0, "SOL": 150.0}
+DEFAULT_PRICES = {"ADA": 0.6, "BTC": 60000.0, "ETH": 3000.0, "SOL": 150.0, "HYPE": 40.0, "NEAR": 2.5}
 SCENARIOS = {
     "breakout-long": {"coin": "SOL", "side": "long", "move": 0.035, "fear_greed": 40.0},
     "breakdown-short": {"coin": "ETH", "side": "short", "move": -0.035, "fear_greed": 75.0},
@@ -33,7 +33,7 @@ SCENARIOS = {
 
 
 class ScenarioMarket:
-    """Made-up 1m candles for the four coins over the last ~45 days; the signal coin makes its move in the
+    """Made-up 1m candles for every coin over the last ~45 days; the signal coin makes its move in the
     last completed 4h candle. Candles of every interval are resampled from the 1m ones."""
 
     def __init__(self, now: pd.Timestamp, scenario: str, prices: dict[str, float] | None = None, seed: int = 7):

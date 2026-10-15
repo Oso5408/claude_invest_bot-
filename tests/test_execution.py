@@ -23,6 +23,13 @@ def test_limit_fills_on_pullback_with_maker_fee():
     assert lo == 98 and hi == 101  # range from the fill bar onwards
 
 
+def test_touching_the_limit_is_not_a_fill_when_price_must_trade_through():
+    b = bars15([100] * 16, lows=[100, 99, 98.9] + [100] * 13, highs=[101] * 16)
+    ex = ExecutionOptimizer(b, b.index[:1], pullback_atr=0.5, through=0.001)  # limit 99, needs 98.901 or lower
+    px, fee, lo, _ = ex(0, 1, signal_close=100, signal_atr=2)
+    assert (px, fee, lo) == (99, ex.maker_fee, 98.9)  # bar 1 only touched 99, bar 2 traded through
+
+
 def test_skip_and_chase_when_never_touched():
     b = bars15(np.linspace(100, 110, 16))
     skip = ExecutionOptimizer(b, b.index[:1], pullback_atr=0.5, on_miss="skip")
