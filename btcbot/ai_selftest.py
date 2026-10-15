@@ -27,8 +27,8 @@ from btcbot import ai_trader as ai
 
 DEFAULT_PRICES = {"ADA": 0.6, "BTC": 60000.0, "ETH": 3000.0, "SOL": 150.0}
 SCENARIOS = {
-    "breakout-long": {"coin": "SOL", "side": "long", "move": 0.05, "fear_greed": 40.0},
-    "breakdown-short": {"coin": "ETH", "side": "short", "move": -0.05, "fear_greed": 75.0},
+    "breakout-long": {"coin": "SOL", "side": "long", "move": 0.035, "fear_greed": 40.0},
+    "breakdown-short": {"coin": "ETH", "side": "short", "move": -0.035, "fear_greed": 75.0},
 }
 
 
@@ -55,7 +55,9 @@ class ScenarioMarket:
             if coin == sc["coin"]:
                 move = (idx >= bar4) & (idx < bar4 + pd.Timedelta(hours=4))
                 after = idx >= bar4 + pd.Timedelta(hours=4)
-                ramp = np.linspace(0, np.log(1 + sc["move"]), move.sum())
+                n = int(move.sum())  # the move is a noisy walk, not a straight line, like a real breakout
+                walk = np.cumsum(rng.normal(0, 0.0015, n))
+                ramp = np.linspace(0, np.log(1 + sc["move"]), n) + walk - np.linspace(0, walk[-1], n)
                 logp = np.log(path)
                 logp[move] = logp[move][0] + ramp
                 logp[after] = logp[move][-1] + np.cumsum(steps[after]) * 0.3  # holds the new level
@@ -135,8 +137,10 @@ def run_scenario(scenario: str, brain, prices: dict | None = None, now: datetime
         t = ai.AITrader(Path(tmp), market, brain)
         t.now = now.to_pydatetime()
         ind = t._overview(market.mids())[sc["coin"]]["indicators"]["4h"]
+        ov = t._overview(market.mids())[sc["coin"]]["indicators"]
         out["signal_in_context"] = {k: ind[k] for k in ("close", "donchian20_high", "donchian10_low",
-                                                         "volume_ratio20", "trend", "atr14_pct")}
+                                                         "volume_ratio20", "trend", "atr14_pct", "rsi14")} \
+            | {"rsi14_1h": ov["1h"]["rsi14"], "rsi14_15m": ov["15m"]["rsi14"]}
         status = t.step(now.to_pydatetime())
         dec = pd.read_csv(Path(tmp) / "decisions.csv").iloc[-1].to_dict()
         views = json.loads(dec["coin_views"]) if isinstance(dec.get("coin_views"), str) else []

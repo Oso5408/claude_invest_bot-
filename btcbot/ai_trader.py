@@ -81,7 +81,13 @@ STRATEGY_NOTES = """Strategies this project already backtested (Hyperliquid or G
   relative strength, z-score mean reversion, grids. Reason: a round trip costs about 0.19% (fees +
   slippage), so with a 0.5% stop each trade starts about 0.4R behind. Rule of thumb from that work: avoid
   stops tighter than 1.5% unless the edge is very strong.
-- Fear & Greed: blocking shorts when the index is above 50 helped the breakout; long-side filters hurt."""
+- Fear & Greed: blocking shorts when the index is above 50 helped the breakout; long-side filters hurt.
+- How the 4h breakout enters: at the close of the 4h candle that breaks the 20-bar high (long, volume at
+  least 1.2x) or the 10-bar low (short), stop about 2x ATR away. A breakout candle nearly always looks
+  overbought or oversold (RSI high or low, price far from the averages): that is what a breakout is, and
+  the backtest made its money from exactly those entries. Waiting for a pullback or skipping because RSI
+  is extreme was never tested, and every extra entry filter tested here (SMA50 and ATR room filters,
+  Fear & Greed long filters, pullback limit entries) made results worse or no better."""
 
 TRADER_SYSTEM = f"""You run a small paper-trading account (fake money, a research experiment) on Hyperliquid \
 perpetual futures. Your owner wants to see whether you can choose good trades yourself. You are called once \
@@ -124,8 +130,12 @@ Trading guides you can open with read_skill when they help a decision (general c
 for Solana tokens; ignore anything about Solana, PumpFun, DEX liquidity or scripts, and where a guide \
 disagrees with this project's backtest results above, the backtests win):
 {chr(10).join(f"- {k}: {v}" for k, v in SKILLS.items())}
-Read regime-detection when you judge which strategy fits a coin, and exit-strategies before placing any \
-order (each guide only once per day is enough; you see which ones you already read today in the context). \
+When a coin shows a fresh 4h breakout, the evidence favours taking it (shorts weaker when Fear & Greed is \
+above 50); if you skip one, give a concrete reason with evidence, not only "RSI is high" or "overextended".
+
+The regime-detection guide is in the context every time; use it when you judge which strategy fits a coin. \
+Read exit-strategies before placing any order (once per day is enough; you see which guides you already \
+read today in the context). \
 The guides never change the hard limits. If a guide shaped a trade, say which in the reason.
 
 Do not invent prices. When you are done, call finish once with your view on every coin (even the ones \
@@ -527,6 +537,7 @@ class AITrader:
                 "last_10_closed_trades": last,
                 "fear_greed_last_7_days": self._fear_greed(),
                 "guides_read_today": self._guides_today(),
+                "regime_detection_guide": self._auto_guide("regime-detection"),
                 "market_overview": self._overview(mids),
                 "big_accounts": self._whale_watch()}
 
@@ -535,6 +546,12 @@ class AITrader:
             return dict(list(self.market.fear_greed().items())[-7:])
         except Exception as e:
             return f"unavailable: {e}"
+
+    def _auto_guide(self, name: str) -> str:
+        """A guide put in every decision's context, so it is read whether or not Claude asks for it."""
+        if name not in self._skills_read:
+            self._skills_read.append(name)
+        return (SKILLS_DIR / f"{name}.md").read_text()
 
     def _guides_today(self) -> list[str]:
         path = self.folder / "skills.csv"

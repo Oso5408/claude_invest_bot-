@@ -217,8 +217,8 @@ def test_read_skill_is_logged_and_reported(tmp_path):
     t = ai.AITrader(tmp_path, FakeMarket(), brain)
     t.step(T0)
     assert "# Exit Strategies" in brain.results[0] and isinstance(brain.results[2], ValueError)
-    assert pd.read_csv(tmp_path / "skills.csv")["skills_read"].iloc[0] == "exit-strategies"
-    assert "09: exit-strategies" in ai.report_text(tmp_path, T0)
+    assert pd.read_csv(tmp_path / "skills.csv")["skills_read"].iloc[0] == "regime-detection,exit-strategies"
+    assert "09: regime-detection,exit-strategies" in ai.report_text(tmp_path, T0)
 
 
 def test_every_skill_file_exists_and_is_listed():
@@ -275,7 +275,14 @@ def test_context_has_fear_greed_and_guides_read_today(tmp_path):
     t.step(T0.replace(hour=1, minute=2))
     ctx = brain.contexts[1]
     assert ctx["fear_greed_last_7_days"] == {"2026-10-13": 40.0}
-    assert ctx["guides_read_today"] == ["exit-strategies"]
+    assert ctx["guides_read_today"] == ["exit-strategies", "regime-detection"]
+    assert "regime" in ctx["regime_detection_guide"].lower()
+    skills = pd.read_csv(tmp_path / "skills.csv", keep_default_na=False)
+    assert all("regime-detection" in x for x in skills["skills_read"])
+
+
+def test_prompt_says_breakout_entries_are_the_tested_ones():
+    assert "never tested" in ai.TRADER_SYSTEM and "fresh 4h breakout" in ai.TRADER_SYSTEM
 
 
 def test_report_uses_jst_and_shows_equity_after_api_cost(tmp_path):
