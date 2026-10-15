@@ -266,3 +266,21 @@ def test_overview_has_indicators_per_timeframe(tmp_path):
     ov = brain.contexts[0]["market_overview"]["ADA"]["indicators"]
     assert set(ov) == {"4h", "1h", "15m"}
     assert "error" in brain.results[0] or "rsi14" in brain.results[0]
+
+
+def test_context_has_fear_greed_and_guides_read_today(tmp_path):
+    brain = ViewBrain([("read_skill", {"name": "exit-strategies"})])
+    t = ai.AITrader(tmp_path, FakeMarket(), brain)
+    t.step(T0)
+    t.step(T0.replace(hour=1, minute=2))
+    ctx = brain.contexts[1]
+    assert ctx["fear_greed_last_7_days"] == {"2026-10-13": 40.0}
+    assert ctx["guides_read_today"] == ["exit-strategies"]
+
+
+def test_report_uses_jst_and_shows_equity_after_api_cost(tmp_path):
+    t = ai.AITrader(tmp_path, FakeMarket(), ViewBrain([]))
+    t.step(T0)
+    text = ai.report_text(tmp_path, T0.replace(minute=35))
+    assert "times in JST" in text and "10-14 09:02" in text
+    assert "equity after API cost: 199.70" in text
