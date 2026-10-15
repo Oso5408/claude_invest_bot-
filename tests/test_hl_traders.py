@@ -29,7 +29,7 @@ def fill(coin, px, sz, closed=0.0, fee=0.1):
 
 FILLS = {
     "0xsteady": [fill("ADA", 0.6, 10_000, 0), fill("ADA", 0.65, 10_000, 500)] * 12 + [fill("DOGE", 0.1, 10_000, 50)],
-    "0xbtcguy": [fill("HYPE", 30, 100, 200)] * 20 + [fill("BTC", 80_000, 0.01, -5)],
+    "0xbtcguy": [fill("ZEC", 30, 100, 200)] * 20 + [fill("BTC", 80_000, 0.01, -5)],
 }
 STATE = {"assetPositions": [{"type": "oneWay", "position": {"coin": "ADA", "szi": "-5000", "entryPx": "0.6",
                                                                "positionValue": "3000", "unrealizedPnl": "10"}}]}
@@ -94,11 +94,11 @@ def test_lists_every_coin_the_winners_trade():
     lb, checked = ht.scan(session=Session(), now=datetime(2026, 10, 15, tzinfo=timezone.utc), pause=0,
                           progress=lambda *_: None)
     table = ht.coin_table(checked)
-    assert set(table.index) == {"HYPE", "ADA", "BTC", "DOGE"}
-    assert table.loc["HYPE", "traders"] == 1 and table.loc["HYPE", "pnl"] == round(20 * (200 - 0.1))
+    assert set(table.index) == {"ZEC", "ADA", "BTC", "DOGE"}
+    assert table.loc["ZEC", "traders"] == 1 and table.loc["ZEC", "pnl"] == round(20 * (200 - 0.1))
     assert table.loc["BTC", "traders_in_profit"] == 0 and abs(table["volume_share"].sum() - 1) < 0.01
     steady = checked.set_index("address").loc["0xsteady"]
     assert steady["top_coins"].startswith("ADA ") and "DOGE" in steady["top_coins"]
     text = ht.report(lb, checked)
-    assert "HYPE" in text and "ADA *" in text and "most traded: ADA" in text
+    assert "ZEC" in text and "ADA *" in text and "most traded: ADA" in text
     assert ht.coin_label("@107") == "@107 (spot)"

@@ -1,4 +1,4 @@
-"""Scan the whole Hyperliquid leaderboard for good traders who trade our coins (ADA, BTC, ETH, SOL).
+"""Scan the whole Hyperliquid leaderboard for good traders who trade our coins (the AI account's COINS: ADA, BTC, ETH, SOL, HYPE, NEAR).
 
 Step 1, leaderboard (one download, every account): keep accounts that
 - hold at least --min-equity USD (default 10,000) so it isn't one lucky bet on a tiny account,
@@ -205,7 +205,7 @@ def report(lb: pd.DataFrame, checked: pd.DataFrame, top: int = 20) -> str:
 
 
 def main(argv: list[str] | None = None) -> None:
-    p = argparse.ArgumentParser(description="Find steady Hyperliquid leaderboard traders who trade ADA/BTC/ETH/SOL")
+    p = argparse.ArgumentParser(description="Find steady Hyperliquid leaderboard traders who trade the AI account's coins")
     p.add_argument("--min-equity", type=float, default=10_000)
     p.add_argument("--candidates", type=int, default=100)
     p.add_argument("--top", type=int, default=20, help="how many to print")

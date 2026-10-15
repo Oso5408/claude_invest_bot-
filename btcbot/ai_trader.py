@@ -9,7 +9,7 @@ order, so no prompt or answer from Claude can get around them:
 - at most MAX_MARGIN_USD of margin per trade, at most MAX_POSITION_LEVERAGE on that margin
   (20 USD x 3 = 60 USD position; two of them on a 200 USD account is 0.6x, inside risk.MAX_LEVERAGE)
 - every trade needs a stop loss, no more than MAX_STOP_PCT from the entry (well before liquidation)
-- coins limited to COINS (Hyperliquid perps)
+- coins limited to COINS (Hyperliquid perps: ADA, BTC, ETH, SOL, HYPE, NEAR)
 
 Claude can also read a few trading guides (btcbot/skills/, copied from agiprolabs/claude-trading-skills
 at a fixed commit) with the read_skill tool; they are text only and change none of the limits above.
@@ -49,7 +49,7 @@ MAX_ENTRIES_PER_DAY: Final[int] = 2
 MAX_MARGIN_USD: Final[float] = 20.0
 MAX_POSITION_LEVERAGE: Final[float] = 3.0
 MAX_STOP_PCT: Final[float] = 0.25
-COINS: Final[tuple[str, ...]] = ("ADA", "BTC", "ETH", "SOL")
+COINS: Final[tuple[str, ...]] = ("ADA", "BTC", "ETH", "SOL", "HYPE", "NEAR")
 SLIPPAGE = 0.0005
 INITIAL_USD = 200.0
 DEFAULT_SLOTS_JST = tuple(range(24))  # every hour
@@ -66,7 +66,7 @@ SKILLS: Final[dict[str, str]] = {  # name -> when to read it (shown in the promp
     "exit-strategies": "where to put the stop, take profit and time limit, trailing stops",
     "volatility-modeling": "ATR and realized volatility, how wide a stop should be",
     "copy-trading": "whether a big account's trades are worth following or just luck",
-    "correlation-analysis": "how closely the four coins move together, so two trades are not one doubled bet",
+    "correlation-analysis": "how closely the coins move together, so two trades are not one doubled bet",
     "mean-reversion": "testing whether a move is likely to revert (this project's z-score mean reversion lost after costs)",
     "cointegration-analysis": "pairs trading two coins (needs two orders, so it uses both of the day's trades)",
 }
@@ -88,7 +88,14 @@ STRATEGY_NOTES = """Strategies this project already backtested (Hyperliquid or G
   overbought or oversold (RSI high or low, price far from the averages): that is what a breakout is, and
   the backtest made its money from exactly those entries. Waiting for a pullback or skipping because RSI
   is extreme was never tested, and every extra entry filter tested here (SMA50 and ATR room filters,
-  Fear & Greed long filters, pullback limit entries) made results worse or no better."""
+  Fear & Greed long filters, pullback limit entries) made results worse or no better.
+- Limit order first, market order if not filled within 1 hour (ADA 4h breakout, 15m bars): worse than a
+  plain market entry in every setup (2x with the F&G filter +855% -> +576% to +627%). The limit fills on
+  pullbacks, while the trades that run straight away get chased at a worse price, and those are the big ones.
+- Same 4h breakout on NEAR and HYPE (Hyperliquid, about 2 years): both worse than ADA over the same dates.
+  NEAR 1x long +88%, 2x results fragile; HYPE 1x long +93%, HYPE shorts lost money while the coin rose
+  about 500%. NEAR and HYPE are in this account because the steady leaderboard winners trade them a lot,
+  not because a strategy was proven on them."""
 
 TRADER_SYSTEM = f"""You run a small paper-trading account (fake money, a research experiment) on Hyperliquid \
 perpetual futures. Your owner wants to see whether you can choose good trades yourself. You are called once \
@@ -127,7 +134,7 @@ out. Name the strategy and give your reason on every order; your owner reads the
 {STRATEGY_NOTES}
 These are research results, not rules for this account. The Fear & Greed short filter belongs to the 4h \
 breakout only; it does not forbid shorts in other strategies. The current index is in the context. The \
-backtests were mostly on ADA; BTC, ETH and SOL can behave differently, so judge each coin on its own \
+backtests were mostly on ADA; BTC, ETH, SOL, HYPE and NEAR can behave differently, so judge each coin on its own \
 market rather than waiting for the same ADA breakout everywhere.
 
 Trading guides you can open with read_skill when they help a decision (general crypto guides written \

@@ -30,7 +30,7 @@ from btcbot.data import load_csv, resample
 class ExecutionOptimizer:
     def __init__(self, bars15: pd.DataFrame, index4h: pd.DatetimeIndex, pullback_atr: float = 0.5,
                  window: int = 16, on_miss: str = "skip", maker_fee: float = 0.00015,
-                 taker_fee: float = 0.00045, slippage: float = 0.0005):
+                 taker_fee: float = 0.00045, slippage: float = 0.0005, through: float = 0.0):
         if on_miss not in ("skip", "chase"):
             raise ValueError(f"unknown on_miss {on_miss}")
         self.o, self.h, self.l, self.c = (bars15[k].to_numpy() for k in ("open", "high", "low", "close"))
@@ -40,6 +40,7 @@ class ExecutionOptimizer:
         self.last = np.searchsorted(times, starts + pd.Timedelta("4h").value, side="left")  # exclusive
         self.pullback_atr, self.window, self.on_miss = pullback_atr, window, on_miss
         self.maker_fee, self.taker_fee, self.slippage = maker_fee, taker_fee, slippage
+        self.through = through  # price must trade this far past the limit to count as filled (queue position)
         self.filled = self.chased = self.skipped = 0
         self.saved = []  # entry price improvement vs a market order at the 4h open, per filled entry
 
@@ -51,7 +52,8 @@ class ExecutionOptimizer:
         limit = signal_close - direction * self.pullback_atr * signal_atr
         end = min(b, a + self.window)
         for j in range(a, end):
-            if (direction > 0 and self.l[j] <= limit) or (direction < 0 and self.h[j] >= limit):
+            if ((direction > 0 and self.l[j] <= limit * (1 - self.through))
+                    or (direction < 0 and self.h[j] >= limit * (1 + self.through))):
                 px = min(self.o[j], limit) if direction > 0 else max(self.o[j], limit)
                 self.filled += 1
                 self.saved.append(direction * (market - px) / market)

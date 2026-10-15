@@ -12,7 +12,7 @@ from btcbot import ai_trader as ai
 
 class FakeMarket:
     def __init__(self, price=1.0):
-        self.price = {"ADA": price, "BTC": 60000.0, "ETH": 3000.0, "SOL": 150.0}
+        self.price = {"ADA": price, "BTC": 60000.0, "ETH": 3000.0, "SOL": 150.0, "HYPE": 40.0, "NEAR": 2.5}
         self.bars = {}  # coin -> 1m DataFrame
 
     def mids(self):
