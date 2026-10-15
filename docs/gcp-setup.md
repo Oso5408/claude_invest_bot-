@@ -240,9 +240,11 @@ tail -20 ~/claude_invest_bot-/data/monitor.log         # 監察系統本身嘅 l
 
 Claude 每個鐘決定一次（一日 24 次）。佢可以睇 K 線、資金費率、恐懼與貪婪指數、上網搜尋，亦可以睇 Hyperliquid 排行榜上最賺錢嗰批大戶（「大鯊魚」）而家持有乜嘢倉位，再自己決定跟唔跟。每單都要寫低用咩策略同原因。
 
-每次決定，Claude 一定要睇晒 4 隻幣（每隻都睇 4 小時、1 小時同 15 分鐘 K 線），每隻幣比較幾種策略（順勢突破、區間來回、跟大戶、資金費率或情緒極端等），再對每隻幣講「做多、做空定唔做」同原因，記喺 `decisions.csv` 嘅 `coin_views`。程式會先幫 Claude 準確計好指標（EMA 20/50/200、RSI 14、ATR 14、布林通道、唐奇安通道、成交量比率），每隻幣 4 小時、1 小時同 15 分鐘各一套，唔使 Claude 自己由 K 線估。程式亦會自動睇排行榜頭 10 個大戶，比較同上次決定之間佢哋開咗、平咗、加咗、減咗定反手咗乜嘢倉，記喺 `whales.csv`，日報會寫出嚟。每單平倉之後，Claude 會寫幾句解釋點解贏或者輸。每日 09:35 會寫一份繁體中文日報，有設定 Telegram 就會一齊發去 Telegram。
+每次決定，Claude 一定要睇晒 6 隻幣（每隻都睇 4 小時、1 小時同 15 分鐘 K 線），每隻幣比較幾種策略（順勢突破、區間來回、跟大戶、資金費率或情緒極端等），再對每隻幣講「做多、做空定唔做」同原因，記喺 `decisions.csv` 嘅 `coin_views`。程式會先幫 Claude 準確計好指標（EMA 20/50/200、RSI 14、ATR 14、布林通道、唐奇安通道、成交量比率），每隻幣 4 小時、1 小時同 15 分鐘各一套，唔使 Claude 自己由 K 線估。程式亦會自動睇排行榜頭 10 個大戶，比較同上次決定之間佢哋開咗、平咗、加咗、減咗定反手咗乜嘢倉，記喺 `whales.csv`，日報會寫出嚟。每單平倉之後，Claude 會寫幾句解釋點解贏或者輸。每日 09:35 會寫一份繁體中文日報，有設定 Telegram 就會一齊發去 Telegram。
 
 **交易指南（skill）：** Claude 決定時可以用 `read_skill` 打開 7 份交易指南：`regime-detection`（判斷趨勢定上落市）、`exit-strategies`（止蝕、止賺、持倉時間）、`volatility-modeling`（用波幅定止蝕距離）、`copy-trading`（判斷大戶係咪值得跟）、`correlation-analysis`（4 隻幣幾同步）、`mean-reversion`（均值回歸，我哋回測係蝕）、`cointegration-analysis`（兩隻幣配對交易）。佢哋係由 agiprolabs/claude-trading-skills 固定版本抄入 `btcbot/skills/`，刪走咗 Solana 同 PumpFun 部分，只係文字，唔會行任何 script，亦唔會改變上面嘅硬性限制。每次決定讀咗邊份記喺 `skills.csv`，日報都會寫出嚟。唔使另外安裝任何嘢，`git pull` 就得。
+
+**跟單大戶（即時通知 AI）：** 程式每 5 分鐘（即係 `step` 嗰行 cron，唔使加新 cron）檢查 5 個揀咗嘅波段大戶（0x2828、0x405e、0xb69e、0x07ea、0xa2e3）。佢哋喺我哋 6 隻幣開新倉、平倉或者反手，而且金額有 1 萬美元以上，就即刻叫 Claude 決定跟唔跟，唔使等下一個鐘。佢哋平倉時，只有我哋揸住同一隻幣先會叫 Claude。每次變化記喺 `data/ai-hl/copy_alerts.csv`，Claude 嘅決定記喺 `decisions.csv`，`trigger` 欄寫 `copy: ...`，日報都會列出嚟。跟單照樣受上面嘅硬上限限制。想改跟邊個，就喺 `data/ai-hl/copy_traders.json` 寫一個地址列表，例如 `["0x405eafc7534c349d5803b206a7cf5f0ab7686af4"]`；冇呢個檔就用預設嘅 5 個。每日大約多 1 至 2 次 Claude 決策。
 
 **費用：** 落單決定用 Claude Sonnet 5.5，日報同每單分析用比較平嘅 Claude Haiku 5.5。每個鐘諗一次，估計每月大約 50 至 80 美元。實際數字記喺 `decisions.csv` 同日報入面。記得喺 Anthropic Console 嘅 **Limits** 設定每月上限。
 
