@@ -25,8 +25,13 @@ MAKER_FEE = 0.00015
 INTERVAL_MS = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
 
 
-def _post(url: str, body: dict, session: requests.Session | None = None):
-    resp = (session or requests).post(url, json=body, timeout=30)
+def _post(url: str, body: dict, session: requests.Session | None = None, retries: int = 5, wait: float = 2.0):
+    """POST to the info endpoint; on 429 (rate limit) wait 2, 4, 8, 16, 32 s and try again."""
+    for attempt in range(retries + 1):
+        resp = (session or requests).post(url, json=body, timeout=30)
+        if resp.status_code != 429 or attempt == retries:
+            break
+        time.sleep(wait * 2 ** attempt)
     resp.raise_for_status()
     return resp.json()
 
@@ -54,7 +59,7 @@ def fetch_candles(coin: str, interval: str = "4h", start_ms: int = 0, end_ms: in
                                "req": {"coin": coin, "interval": interval, "startTime": t, "endTime": min(t + step, end_ms)}}, s)
             frames.append(parse_candles(rows))
             t += step
-            time.sleep(0.2)
+            time.sleep(0.5)
     df = pd.concat(frames)
     return df[~df.index.duplicated(keep="last")].sort_index()
 
@@ -82,7 +87,7 @@ def fetch_funding(coin: str, start_ms: int, end_ms: int | None = None, url: str 
             if nxt <= t:
                 break
             t = nxt
-            time.sleep(0.2)
+            time.sleep(0.5)
     if not parts:
         return parse_funding([])
     out = pd.concat(parts)

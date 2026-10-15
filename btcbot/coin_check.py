@@ -15,6 +15,7 @@ Read-only public data, no key, no orders. Run on the VM (the cloud container can
 from __future__ import annotations
 
 import argparse
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -36,7 +37,8 @@ def load(coin: str, out: Path, refresh: bool = True) -> tuple[pd.DataFrame, pd.S
     from btcbot.data import load_csv
     from btcbot.hyperliquid import load_funding
     cpath, fpath = out / f"{coin}_4h.csv", out / f"{coin}_funding.csv"
-    if refresh or not cpath.exists():
+    fresh = cpath.exists() and fpath.exists() and time.time() - cpath.stat().st_mtime < 12 * 3600
+    if not fresh and (refresh or not cpath.exists()):  # a rerun within 12 hours reuses today's download
         candles = fetch_candles(coin, "4h")
         candles.to_csv(cpath)
         fetch_funding(coin, int(candles.index[0].timestamp() * 1000)).to_csv(fpath)

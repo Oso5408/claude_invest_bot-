@@ -36,6 +36,8 @@ STATE = {"assetPositions": [{"type": "oneWay", "position": {"coin": "ADA", "szi"
 
 
 class Resp:
+    status_code = 200
+
     def __init__(self, data):
         self.data = data
 
