@@ -85,3 +85,17 @@ def test_losing_or_rare_traders_in_our_coins_are_dropped():
         {"address": "0xc", "equity": 1e5, "our_share": 0.9, "our_fills": 30, "our_pnl_30d": 1000},
         {"address": "0xd", "equity": 1e4, "our_share": 0.5, "our_fills": 30, "our_pnl_30d": 1000}])
     assert list(ht.ours(checked)["address"]) == ["0xd", "0xc"]
+
+
+def test_lists_every_coin_the_winners_trade():
+    lb, checked = ht.scan(session=Session(), now=datetime(2026, 10, 15, tzinfo=timezone.utc), pause=0,
+                          progress=lambda *_: None)
+    table = ht.coin_table(checked)
+    assert set(table.index) == {"HYPE", "ADA", "BTC", "DOGE"}
+    assert table.loc["HYPE", "traders"] == 1 and table.loc["HYPE", "pnl"] == round(20 * (200 - 0.1))
+    assert table.loc["BTC", "traders_in_profit"] == 0 and abs(table["volume_share"].sum() - 1) < 0.01
+    steady = checked.set_index("address").loc["0xsteady"]
+    assert steady["top_coins"].startswith("ADA ") and "DOGE" in steady["top_coins"]
+    text = ht.report(lb, checked)
+    assert "HYPE" in text and "ADA *" in text and "most traded: ADA" in text
+    assert ht.coin_label("@107") == "@107 (spot)"

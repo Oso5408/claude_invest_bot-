@@ -12,6 +12,7 @@ balance makes it huge (the first scan's top ROI, +2264%, was 2,264 USD on a 235k
 Step 2, for the best --candidates (default 100): their fills of the last 30 days (userFillsByTime) and
 open positions (clearinghouseState). Keep those with at least 20% of their traded volume and 20 fills in
 our coins and a realized profit in them, ranked by that profit / equity ("our_return").
+It also lists what every checked account trades (all coins), per account and summed over all of them.
 
 The best --keep (default 20) go to data/hl-traders/latest.json; the AI paper account watches those
 (ai_trader.HLMarket.leaderboard) while the file is under 48 hours old, else the plain leaderboard.
@@ -79,7 +80,15 @@ def coin_stats(fills: list[dict], coins=COINS) -> dict:
     closes = [float(f["closedPnl"]) for f in ours if float(f.get("closedPnl", 0) or 0) != 0]
     pnl = {c: round(sum(float(f.get("closedPnl", 0) or 0) - float(f.get("fee", 0) or 0)
                         for f in ours if f["coin"] == c)) for c in coins}
-    return {"fills_30d": len(fills), "our_fills": len(ours), "our_share": round(vol / total, 2) if total else 0.0,
+    every = {}  # every coin they traded: [volume, realized pnl after fees, fills]
+    for f in fills:
+        v = every.setdefault(f["coin"], [0.0, 0.0, 0])
+        v[0] += float(f["px"]) * float(f["sz"])
+        v[1] += float(f.get("closedPnl", 0) or 0) - float(f.get("fee", 0) or 0)
+        v[2] += 1
+    top = sorted(every.items(), key=lambda kv: -kv[1][0])
+    return {"top_coins": ", ".join(f"{c} {v[0] / total:.0%}" for c, v in top[:5]) if total else "",
+            "coins_json": json.dumps({c: [round(v[0]), round(v[1]), v[2]] for c, v in top}),"fills_30d": len(fills), "our_fills": len(ours), "our_share": round(vol / total, 2) if total else 0.0,
             "our_win_rate": round(sum(x > 0 for x in closes) / len(closes), 2) if closes else None,
             "our_pnl_30d": sum(pnl.values()), **{f"pnl_{c}": v for c, v in pnl.items()},
             "fills_capped": len(fills) >= 2000}
@@ -144,6 +153,30 @@ def watchlist(good: pd.DataFrame, now: datetime, keep: int = 20) -> list[dict]:
     return out
 
 
+def coin_table(checked: pd.DataFrame) -> pd.DataFrame:
+    """What the checked steady winners trade, all coins: traders, share of their volume, realized PnL."""
+    rows = []
+    for addr, js in zip(checked.get("address", []), checked.get("coins_json", [])):
+        if isinstance(js, str):
+            for coin, (vol, pnl, n) in json.loads(js).items():
+                rows.append({"coin": coin, "address": addr, "volume": vol, "pnl": pnl, "fills": n})
+    if not rows:
+        return pd.DataFrame(columns=["traders", "volume_share", "pnl", "traders_in_profit", "fills"])
+    df = pd.DataFrame(rows)
+    out = df.groupby("coin").agg(traders=("address", "nunique"), volume=("volume", "sum"), pnl=("pnl", "sum"),
+                                 traders_in_profit=("pnl", lambda x: int((x > 0).sum())), fills=("fills", "sum"))
+    out["volume_share"] = (out["volume"] / out["volume"].sum()).round(3)
+    return out.sort_values(["traders", "volume"], ascending=False)[
+        ["traders", "volume_share", "pnl", "traders_in_profit", "fills"]]
+
+
+def coin_label(coin: str) -> str:
+    """Spot pairs show up as '@107' or 'PURR/USDC', builder-deployed perps as 'dex:COIN'."""
+    if coin.startswith("@") or "/" in coin:
+        return f"{coin} (spot)"
+    return coin
+
+
 def report(lb: pd.DataFrame, checked: pd.DataFrame, top: int = 20) -> str:
     good = ours(checked)
     lines = [f"{len(lb)} accounts on the leaderboard, {len(checked)} steady winners checked, "
@@ -156,7 +189,16 @@ def report(lb: pd.DataFrame, checked: pd.DataFrame, top: int = 20) -> str:
                      f"  (all coins 30d {r.month_pnl:+,.0f}, 7d {r.week_pnl:+,.0f})")
         lines.append(f"    our coins {r.our_share:.0%} of volume, {int(r.our_fills)} fills, win {win}, realized 30d {coins or 0}"
                      f"{' (fills capped at 2000)' if r.fills_capped else ''}")
+        lines.append(f"    most traded: {r.top_coins}")
         lines.append(f"    holds now: {r.holds_now or 'nothing in our coins'}")
+    table = coin_table(checked)
+    lines += ["", f"What all {len(checked)} steady winners traded in 30 days (top 25 by number of traders):",
+              f"{'coin':<20}{'traders':>8}{'in profit':>10}{'volume':>8}{'realized PnL':>16}"]
+    for coin, r in table.head(25).iterrows():
+        mark = " *" if coin in COINS else ""
+        lines.append(f"{coin_label(coin) + mark:<20}{int(r.traders):>8}{int(r.traders_in_profit):>10}{r.volume_share:>8.1%}"
+                     f"{r.pnl:>+16,.0f}")
+    lines.append("(* = one of our coins; volume = share of all their volume; PnL is after fees, closed trades only)")
     return "\n".join(lines)
 
 
@@ -174,6 +216,7 @@ def main(argv: list[str] | None = None) -> None:
     out.mkdir(parents=True, exist_ok=True)
     path = out / f"{now:%Y-%m-%d}.csv"
     checked.to_csv(path, index=False)
+    coin_table(checked).to_csv(out / f"{now:%Y-%m-%d}-coins.csv")
     watch = watchlist(ours(checked), now, a.keep)
     (out / LATEST.name).write_text(json.dumps(watch, indent=1))
     print(report(lb, checked, a.top))
