@@ -259,6 +259,12 @@ cd ~/claude_invest_bot- && git pull && .venv/bin/pip install -r requirements.txt
 35 0 * * * . $HOME/.anthropic_env; . $HOME/.telegram_env; cd $HOME/claude_invest_bot- && .venv/bin/python -m btcbot.ai_trader report --folder data/ai-hl >> data/ai-hl-report.log 2>&1
 ```
 
+**AI 睇邊啲大戶：** 每日掃一次成個 Hyperliquid 排行榜，揀出穩定賺錢、而且喺 ADA/BTC/ETH/SOL 有實際已實現盈利嘅交易員（本週、本月、歷來都賺；唔係一星期內賺晒；30 日內喺呢四隻幣最少 20 單、佔佢成交兩成以上），按「呢四隻幣賺嘅錢 ÷ 本金」排，頭 20 個寫入 `data/hl-traders/latest.json`，AI 就睇呢班人。檔案超過 48 小時未更新，AI 會自動退返用排行榜 30 日最賺嘅帳戶。唔使 Claude 錢，每次大約 3 分鐘。喺 crontab 再加一行（每日日本時間 06:00）：
+
+```
+0 21 * * * cd $HOME/claude_invest_bot- && .venv/bin/python -m btcbot.hl_traders >> data/hl-traders.log 2>&1
+```
+
 **睇結果：**
 
 ```bash

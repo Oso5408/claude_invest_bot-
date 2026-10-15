@@ -1,3 +1,6 @@
+import json
+import os
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -291,3 +294,17 @@ def test_report_uses_jst_and_shows_equity_after_api_cost(tmp_path):
     text = ai.report_text(tmp_path, T0.replace(minute=35))
     assert "times in JST" in text and "10-14 09:02" in text
     assert "equity after API cost: 199.70" in text
+
+
+def test_market_watches_the_daily_trader_scan(tmp_path, monkeypatch):
+    scan = [{"address": "0xsteady", "account_value": 50_000, "pnl_30d": 5998, "roi_30d": 0.12,
+             "pnl_by_coin": {"ADA": 5998}}]
+    f = tmp_path / "latest.json"
+    f.write_text(json.dumps(scan))
+    m = ai.HLMarket(cache_dir=tmp_path, traders_file=f)
+    assert m.leaderboard() == scan
+    old = time.time() - 49 * 3600
+    os.utime(f, (old, old))  # stale scan: back to the plain leaderboard
+    monkeypatch.setattr(m.session, "get", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("leaderboard")))
+    with pytest.raises(RuntimeError, match="leaderboard"):
+        m.leaderboard()
