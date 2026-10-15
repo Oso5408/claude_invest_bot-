@@ -82,8 +82,9 @@ STRATEGY_NOTES = """Strategies this project already backtested (Hyperliquid or G
   slippage), so with a 0.5% stop each trade starts about 0.4R behind. Rule of thumb from that work: avoid
   stops tighter than 1.5% unless the edge is very strong.
 - Fear & Greed: blocking shorts when the index is above 50 helped the breakout; long-side filters hurt.
-- How the 4h breakout enters: at the close of the 4h candle that breaks the 20-bar high (long, volume at
-  least 1.2x) or the 10-bar low (short), stop about 2x ATR away. A breakout candle nearly always looks
+- How the 4h breakout enters and exits: enter at the close of the 4h candle that breaks the 20-bar high
+  (long, volume at least 1.2x) or the 10-bar low (short); the only exit is a 2x ATR trailing stop
+  (trailing_atr_mult 2, no take profit, no time limit), because the profit comes from a few long trends. A breakout candle nearly always looks
   overbought or oversold (RSI high or low, price far from the averages): that is what a breakout is, and
   the backtest made its money from exactly those entries. Waiting for a pullback or skipping because RSI
   is extreme was never tested, and every extra entry filter tested here (SMA50 and ATR room filters,
@@ -185,6 +186,9 @@ TOOLS = [
            "stop_price": {"type": "number"},
            "take_profit_price": {"type": "number", "description": "0 = none"},
            "max_hold_hours": {"type": "number", "description": "close after this many hours; 0 = no limit"},
+           "trailing_atr_mult": {"type": "number", "description": "trailing stop: after each completed 4h "
+                                 "candle the stop moves to the best price since entry minus this many 4h ATR(14), "
+                                 "only ever towards the price; 0 = fixed stop. The backtested 4h breakout uses 2"},
            "strategy": {"type": "string", "description": "short name of the strategy"},
            "reason": {"type": "string", "description": "why this trade, two or three sentences"}}),
     _tool("close_position", "Close an open paper trade now at the current price.",
@@ -407,7 +411,8 @@ class AITrader:
 
     # ----- orders (the only way a trade opens; every limit is checked here) -----
     def place_order(self, coin: str, side: str, margin_usd: float, leverage: float, stop_price: float,
-                    take_profit_price: float, max_hold_hours: float, strategy: str, reason: str) -> dict:
+                    take_profit_price: float, max_hold_hours: float, strategy: str, reason: str,
+                    trailing_atr_mult: float = 0.0) -> dict:
         if paused(self.folder):
             raise ValueError("PAUSE file present: no new trades")
         if self.entries_left() <= 0:
@@ -427,6 +432,8 @@ class AITrader:
             raise ValueError(f"stop {stop_price} is on the wrong side of the entry {px:.6g}")
         if abs(px - stop_price) / px > MAX_STOP_PCT:
             raise ValueError(f"stop more than {MAX_STOP_PCT:.0%} from the entry {px:.6g}")
+        if not 0 <= trailing_atr_mult <= 10:
+            raise ValueError("trailing_atr_mult must be 0 (off) to 10")
         if take_profit_price and d * (take_profit_price - px) <= 0:
             raise ValueError(f"take profit {take_profit_price} is on the wrong side of the entry {px:.6g}")
         notional = margin_usd * leverage
@@ -441,7 +448,8 @@ class AITrader:
         pos = {"id": s["next_id"], "coin": coin, "side": d, "qty": notional / px, "entry": px, "margin": margin_usd,
                "leverage": leverage, "stop": stop_price, "take_profit": take_profit_price or 0.0,
                "deadline": str(pd.Timestamp(self.now) + pd.Timedelta(hours=max_hold_hours)) if max_hold_hours else None,
-               "opened": str(self.now), "fees": fee, "funding": 0.0, "strategy": strategy, "reason": reason}
+               "opened": str(self.now), "fees": fee, "funding": 0.0, "strategy": strategy, "reason": reason,
+               "trail_atr": trailing_atr_mult, "best": px, "trail_bar": None}
         s["next_id"] += 1
         s["cash"] -= fee
         s["positions"].append(pos)
@@ -467,7 +475,8 @@ class AITrader:
                "entry": pos["entry"], "exit": px, "stop": pos["stop"], "take_profit": pos["take_profit"],
                "margin": pos["margin"], "leverage": pos["leverage"], "pnl_usd": round(pnl, 4),
                "return_on_margin": round(pnl / pos["margin"], 4), "fees": round(pos["fees"] + fee, 4),
-               "funding": round(pos["funding"], 4), "exit_reason": reason, "entry_reason": pos["reason"]}
+               "funding": round(pos["funding"], 4), "exit_reason": reason, "entry_reason": pos["reason"],
+               "trailing_atr_mult": pos.get("trail_atr", 0.0)}
         row["review"] = self._review(row)
         self._append("trades.csv", row)
         self._save()
@@ -501,7 +510,7 @@ class AITrader:
                 d = pos["side"]
                 if (d > 0 and b["low"] <= pos["stop"]) or (d < 0 and b["high"] >= pos["stop"]):
                     exit_px = (min(b["open"], pos["stop"]) if d > 0 else max(b["open"], pos["stop"])) * (1 - d * SLIPPAGE)
-                    why, when = "stop_loss", t
+                    why, when = ("trailing_stop" if "first_stop" in pos else "stop_loss"), t  # moved by _trail
                 elif pos["take_profit"] and ((d > 0 and b["high"] >= pos["take_profit"])
                                              or (d < 0 and b["low"] <= pos["take_profit"])):
                     exit_px = (max(b["open"], pos["take_profit"]) if d > 0 else min(b["open"], pos["take_profit"])) \
@@ -514,7 +523,38 @@ class AITrader:
             if why:
                 r = self.close_position(pos["id"], why, exit_px, when)
                 notes.append(f"closed #{pos['id']} {pos['coin']} {why} pnl {r['pnl_usd']:+.2f}")
+            elif pos.get("trail_atr"):
+                moved = self._trail(pos)
+                if moved:
+                    notes.append(f"#{pos['id']} {pos['coin']} trailing stop -> {moved:.6g}")
+        if any(p.get("trail_atr") for p in self.state["positions"]):
+            self._save()
         return notes
+
+    def _trail(self, pos: dict) -> float | None:
+        """Like the backtest: at each completed 4h candle, best price since entry minus trail_atr x ATR(14),
+        and the stop only moves towards the price. Returns the new stop when it moved."""
+        now = pd.Timestamp(self.now)
+        if pos.get("trail_bar") and str(now.floor("4h") - pd.Timedelta("4h")) <= pos["trail_bar"]:
+            return None  # no new 4h candle since the last move, skip the download
+        bars = completed(self._indicator_candles(pos["coin"], "4h"), "4h", now)
+        if len(bars) < 30 or (pos.get("trail_bar") and str(bars.index[-1]) <= pos["trail_bar"]):
+            return None
+        pos["trail_bar"] = str(bars.index[-1])
+        held = bars[bars.index + pd.Timedelta("4h") > pd.Timestamp(pos["opened"])]
+        d = pos["side"]
+        if len(held):
+            pos["best"] = max(pos["best"], float(held["high"].max())) if d > 0 else \
+                min(pos["best"], float(held["low"].min()))
+        atr = indicators(bars)["atr14"]
+        if not atr:
+            return None
+        new = pos["best"] - d * pos["trail_atr"] * atr
+        if d * (new - pos["stop"]) <= 0:
+            return None
+        pos.setdefault("first_stop", pos["stop"])
+        pos["stop"] = new
+        return new
 
     def _due_slot(self) -> str | None:
         """The latest decision time of today that has passed and was not handled yet."""
@@ -533,7 +573,8 @@ class AITrader:
                 "equity_usd": round(self.equity(mids), 2), "start_usd": INITIAL_USD,
                 "trades_left_today": self.entries_left(), "prices": mids,
                 "open_trades": [{k: p[k] for k in ("id", "coin", "side", "qty", "entry", "stop", "take_profit",
-                                                   "deadline", "opened", "strategy")} for p in self.state["positions"]],
+                                                   "deadline", "opened", "strategy")} | {"trailing_atr_mult": p.get("trail_atr", 0.0)}
+                               for p in self.state["positions"]],
                 "last_10_closed_trades": last,
                 "fear_greed_last_7_days": self._fear_greed(),
                 "guides_read_today": self._guides_today(),

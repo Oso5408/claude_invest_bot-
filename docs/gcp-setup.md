@@ -269,6 +269,8 @@ cat data/ai-hl/trades.csv                                          # 每單結�
 cat data/ai-hl/reports/$(date +%F).md                              # 今日日報
 ```
 
+AI 落單時可以揀移動止蝕（`trailing_atr_mult`，回測嘅 4h 突破用 2）：每支 4h K 線收市後，止蝕會移到入場以來最好價格減 2 倍 ATR，只會向有利方向移。trades.csv 會記錄 `trailing_stop` 平倉。
+
 想暫停開新單：`touch data/ai-hl/PAUSE`（已有嘅單照樣會止蝕）。刪咗個檔案就恢復。
 
 **自我測試（有訊號時 AI 會唔會用啱策略同落單）：**

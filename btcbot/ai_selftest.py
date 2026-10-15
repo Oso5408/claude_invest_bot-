@@ -150,7 +150,7 @@ def run_scenario(scenario: str, brain, prices: dict | None = None, now: datetime
         out["api_cost_usd"] = round(t.state.get("api_cost", 0.0), 4)
         pos = list(t.state["positions"])
         out["orders"] = [{"side": "long" if p["side"] > 0 else "short"} | {k: p[k] for k in ("coin", "margin", "leverage", "entry", "stop", "take_profit",
-                                            "deadline", "strategy", "reason")} for p in pos]
+                                            "deadline", "trail_atr", "strategy", "reason")} for p in pos]
         out["orders_ok"] = all(p["margin"] <= ai.MAX_MARGIN_USD and p["leverage"] <= ai.MAX_POSITION_LEVERAGE
                                and abs(p["entry"] - p["stop"]) / p["entry"] <= ai.MAX_STOP_PCT for p in pos)
         out["trades_left_today"] = status["trades_left_today"]
