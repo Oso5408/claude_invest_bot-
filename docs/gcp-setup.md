@@ -289,6 +289,14 @@ cd ~/claude_invest_bot- && . $HOME/.anthropic_env && .venv/bin/python -m btcbot.
 
 用假市況試兩次：SOL 4h 帶量突破（做多），同埋 ETH 4h 帶量跌穿而恐懼貪婪指數 75（做空）。每次問 Claude 一次（大約 0.05 美元），之後將價格推到止賺或者止蝕，睇 5 分鐘檢查會唔會平倉。喺臨時資料夾行，唔會掂到 data/ai-hl。加 `--no-claude` 就用固定指令代替 Claude，唔使錢，只試程式。
 
+**Hyperliquid API 自我測試**（bot 用到嘅每個 Hyperliquid API 有冇回應、格式啱唔啱、最新 K 線同資金費率夠唔夠新、ADA/BTC/ETH/SOL 價格合理唔合理、每個 call 幾多 ms）：
+
+```bash
+cd ~/claude_invest_bot- && .venv/bin/python -m btcbot.hl_selftest
+```
+
+只讀公開數據，唔使 key、唔會落單、唔會寫任何檔案。13 項檢查（allMids、Telegram /health、四隻幣嘅 15m/1h/4h K 線同資金費率、規則帳戶用嘅 1m/1h K 線同 l2Book、大戶排行榜同頭 3 個大戶倉位），最後一行 `ALL OK` 就代表全部正常；`FAIL` 嗰行會寫低咩出事。
+
 ## 13. Telegram 指令
 
 用返第 11 節嗰個 Watchdog bot，喺 Telegram 打指令就可以睇帳戶同 VM 狀態。所有指令都只係睇，唔會改任何檔案、唔會落單。bot 只會回應 `TELEGRAM_CHAT_ID` 嗰個 chat，其他人打嚟一律唔理，只會記低喺 log。佢主動問 Telegram 有冇新訊息，所以 VM 唔使開任何 port。唔用 Claude API，冇額外費用。
