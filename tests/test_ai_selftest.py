@@ -55,3 +55,47 @@ def test_scenario_market_is_made_up_but_scaled_to_live_prices():
     m = st.ScenarioMarket(pd.Timestamp(NOW), "breakdown-short", {"ETH": 4000.0})
     assert m.mids()["ETH"] == pytest.approx(4000.0)
     assert list(m.fear_greed().values())[-1] == 75.0
+
+
+def test_trailing_stop_follows_the_trend_then_closes_in_profit(tmp_path):
+    now = pd.Timestamp(NOW).floor("4h") + pd.Timedelta(minutes=2)
+    market = st.ScenarioMarket(now, "breakout-long")
+
+    class Trail(st.ScriptedBrain):
+        def run(self, context, handlers):
+            px = context["prices"]["SOL"]
+            atr = context["market_overview"]["SOL"]["indicators"]["4h"]["atr14"]
+            handlers["place_order"](coin="SOL", side="long", margin_usd=20, leverage=3, stop_price=px - 2 * atr,
+                                    take_profit_price=0, max_hold_hours=0, strategy="4h breakout", reason="r",
+                                    trailing_atr_mult=2)
+            return {"summary": "", "coins": []}
+    t = ai.AITrader(tmp_path, market, Trail("breakout-long"))
+    t.step(now.to_pydatetime())
+    [pos] = t.state["positions"]
+    first_stop, entry = pos["stop"], pos["entry"]
+    t.brain = None
+
+    market.extend("SOL", entry * 1.10, minutes=12 * 60)  # a 12-hour trend up
+    t.step((now + pd.Timedelta(hours=12, minutes=5)).to_pydatetime())
+    [pos] = t.state["positions"]
+    assert pos["stop"] > first_stop and pos["stop"] > entry  # moved up, now locks in a profit
+    moved = pos["stop"]
+    t.step((now + pd.Timedelta(hours=12, minutes=10)).to_pydatetime())  # same 4h candle: no change
+    assert t.state["positions"][0]["stop"] == moved
+
+    market.extend("SOL", moved * 0.99, minutes=60)
+    t.step((now + pd.Timedelta(hours=13, minutes=15)).to_pydatetime())
+    assert t.state["positions"] == []
+    tr = pd.read_csv(tmp_path / "trades.csv").iloc[-1]
+    assert tr["exit_reason"] == "trailing_stop" and tr["pnl_usd"] > 0 and tr["trailing_atr_mult"] == 2
+
+
+def test_trailing_mult_is_checked():
+    class Bad(st.ScriptedBrain):
+        def run(self, context, handlers):
+            with pytest.raises(ValueError):
+                handlers["place_order"](coin="SOL", side="long", margin_usd=20, leverage=3,
+                                        stop_price=context["prices"]["SOL"] * 0.97, take_profit_price=0,
+                                        max_hold_hours=0, strategy="s", reason="r", trailing_atr_mult=-1)
+            return {"summary": "", "coins": []}
+    assert st.run_scenario("breakout-long", Bad("breakout-long"), now=NOW)["orders"] == []
