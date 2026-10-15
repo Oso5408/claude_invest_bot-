@@ -115,11 +115,17 @@ Then open a trade only where you see a real edge after costs; doing nothing is f
 out. Name the strategy and give your reason on every order; your owner reads them in the daily report.
 
 {STRATEGY_NOTES}
+These are research results, not rules for this account. The Fear & Greed short filter belongs to the 4h \
+breakout only; it does not forbid shorts in other strategies. The current index is in the context. The \
+backtests were mostly on ADA; BTC, ETH and SOL can behave differently, so judge each coin on its own \
+market rather than waiting for the same ADA breakout everywhere.
 
 Trading guides you can open with read_skill when they help a decision (general crypto guides written \
 for Solana tokens; ignore anything about Solana, PumpFun, DEX liquidity or scripts, and where a guide \
 disagrees with this project's backtest results above, the backtests win):
 {chr(10).join(f"- {k}: {v}" for k, v in SKILLS.items())}
+Read regime-detection when you judge which strategy fits a coin, and exit-strategies before placing any \
+order (each guide only once per day is enough; you see which ones you already read today in the context). \
 The guides never change the hard limits. If a guide shaped a trade, say which in the reason.
 
 Do not invent prices. When you are done, call finish once with your view on every coin (even the ones \
@@ -133,7 +139,7 @@ REPORT_SYSTEM = """You write the daily report of an AI-run paper-trading account
 who reads Traditional Chinese (Hong Kong style). Plain sentences, under 500 words. Cover: equity now and \
 change since yesterday and since the 200 USD start; every trade closed in the last 24 hours with what \
 strategy it used, the result in USD, and why it won or lost (use the reviews given); open trades; what the \
-AI decided at each decision time and why, including its view on each coin (long / short / no trade and \
+AI decided at each decision time (all times are Japan time, JST; never call them Hong Kong time) and why, including its view on each coin (long / short / no trade and \
 which strategy fits) and what the big Hyperliquid accounts were doing (opened, closed, flipped); which \
 trading guides (skills) the AI read at each decision; the API cost so far. Compare with the rule-based 4h breakout \
 accounts if their numbers are given. Be honest that a few trades prove nothing. Do not recommend \
@@ -519,8 +525,24 @@ class AITrader:
                 "open_trades": [{k: p[k] for k in ("id", "coin", "side", "qty", "entry", "stop", "take_profit",
                                                    "deadline", "opened", "strategy")} for p in self.state["positions"]],
                 "last_10_closed_trades": last,
+                "fear_greed_last_7_days": self._fear_greed(),
+                "guides_read_today": self._guides_today(),
                 "market_overview": self._overview(mids),
                 "big_accounts": self._whale_watch()}
+
+    def _fear_greed(self):
+        try:
+            return dict(list(self.market.fear_greed().items())[-7:])
+        except Exception as e:
+            return f"unavailable: {e}"
+
+    def _guides_today(self) -> list[str]:
+        path = self.folder / "skills.csv"
+        if not path.exists():
+            return []
+        k = pd.read_csv(path, keep_default_na=False)
+        k = k[k["slot"].astype(str).str.startswith(self._day())]
+        return sorted({g for row in k["skills_read"] for g in str(row).split(",") if g and g != "none"})
 
     def _overview(self, mids: dict) -> dict:
         """Per coin: price changes over 15m / 1h / 4h / 24h / 7d, the latest funding and the indicators on
@@ -703,7 +725,9 @@ def report_text(folder: Path, now: datetime, data_dir: Path | None = None) -> st
     parts.append("Open trades: " + json.dumps(st.get("positions", []), default=str))
     rc = folder / "report_cost.csv"
     report_cost = pd.read_csv(rc)["cost_usd"].sum() if rc.exists() else 0.0
-    parts.append(f"API cost so far: {st.get('api_cost', 0) + report_cost:.2f} USD.")
+    api_cost = st.get("api_cost", 0) + report_cost
+    parts.append(f"API cost so far: {api_cost:.2f} USD. Trading equity does not include it; "
+                 f"equity after API cost: {(eq['equity'].iloc[-1] if eq_path.exists() else INITIAL_USD) - api_cost:.2f} USD.")
     if tr_path.exists():
         t = pd.read_csv(tr_path)
         recent = t[pd.to_datetime(t["closed"], utc=True, format="ISO8601") >= since]
@@ -713,8 +737,11 @@ def report_text(folder: Path, now: datetime, data_dir: Path | None = None) -> st
                      + (recent.to_csv(index=False) if len(recent) else "none"))
     if dc_path.exists():
         d = pd.read_csv(dc_path)
-        d = d[pd.to_datetime(d["time"], utc=True, format="ISO8601") >= since]
-        parts.append("Decisions in the last 24h:\n" + (d.to_csv(index=False) if len(d) else "none"))
+        when = pd.to_datetime(d["time"], utc=True, format="ISO8601")
+        d = d[when >= since].copy()
+        d.insert(0, "time_jst", when[when >= since].dt.tz_convert("Asia/Tokyo").dt.strftime("%m-%d %H:%M"))
+        d = d.drop(columns=["time"])
+        parts.append("Decisions in the last 24h (times in JST):\n" + (d.to_csv(index=False) if len(d) else "none"))
     sk_path = folder / "skills.csv"
     if sk_path.exists():
         k = pd.read_csv(sk_path, keep_default_na=False)
@@ -725,7 +752,10 @@ def report_text(folder: Path, now: datetime, data_dir: Path | None = None) -> st
         for f in sorted(data_dir.glob("paper-hl-*/equity.csv")):
             e = pd.read_csv(f)
             if len(e):
-                parts.append(f"Rule-based account {f.parent.name}: equity {e['equity'].iloc[-1]} USD.")
+                tf = f.parent / "trades.csv"
+                n = len(pd.read_csv(tf)) if tf.exists() else 0
+                parts.append(f"Rule-based account {f.parent.name}: equity {e['equity'].iloc[-1]} USD, "
+                             f"closed trades so far {n}.")
     return "\n\n".join(parts)
 
 
