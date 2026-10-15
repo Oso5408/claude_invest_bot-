@@ -115,9 +115,12 @@ entries for ideas that also make sense on 1h and 4h.
 2. Several strategy types for each coin, for example trend following / breakout, range or mean reversion, \
 following the big accounts, funding or sentiment extremes, or one you find by searching the web. Pick \
 the one that fits each coin's current market best, or none.
-3. The big accounts: the context has what the most profitable Hyperliquid accounts hold now and what they \
-changed since your last decision (opened, closed, added, cut, flipped). Say what they seem to be doing and \
-whether it is worth following; they can be hedging or just lucky. get_whale_positions shows more detail.
+3. The big accounts: the context has what the watched Hyperliquid accounts hold now and what they \
+changed since your last decision (opened, closed, added, cut, flipped). They come from a daily scan of \
+the whole leaderboard: steady winners (up on the week, month and all time) with a realized profit in our \
+coins over 30 days; their pnl_30d and roi_30d are that profit in our coins and its share of their equity. \
+If the scan is missing they are the leaderboard's top 30-day PnL instead (no pnl_by_coin field). Say what \
+they seem to be doing and whether it is worth following; they can be hedging or just lucky. get_whale_positions shows more detail.
 Then open a trade only where you see a real edge after costs; doing nothing is fine when nothing stands \
 out. Name the strategy and give your reason on every order; your owner reads them in the daily report.
 
@@ -174,8 +177,8 @@ TOOLS = [
           {"coin": COIN, "interval": {"type": "string", "enum": ["5m", "15m", "1h", "4h", "1d"]}}),
     _tool("get_funding", "Hourly funding rates of the last 48 hours (positive: longs pay shorts).", {"coin": COIN}),
     _tool("get_fear_greed", "Crypto Fear & Greed Index (0-100) of the last 14 days.", {}),
-    _tool("get_whale_positions", "Open positions of the most profitable Hyperliquid accounts of the last "
-          "30 days (the leaderboard), biggest positions first.",
+    _tool("get_whale_positions", "Open positions of the watched Hyperliquid accounts (steady traders in our "
+          "coins from the daily leaderboard scan), biggest positions first.",
           {"top": {"type": "integer", "description": "how many accounts, 1 to 20"}}),
     _tool("read_skill", "Read one of the trading guides listed in the instructions (markdown text).",
           {"name": {"type": "string", "enum": list(SKILLS)}}),
@@ -250,9 +253,10 @@ def completed(df: pd.DataFrame, interval: str, now: pd.Timestamp) -> pd.DataFram
 class HLMarket:
     """Public Hyperliquid data plus the Fear & Greed Index. No account or key."""
 
-    def __init__(self, url: str = MAINNET, cache_dir: Path | None = None):
+    def __init__(self, url: str = MAINNET, cache_dir: Path | None = None, traders_file: Path | None = None):
         self.url = url
         self.cache_dir = cache_dir
+        self.traders_file = traders_file  # daily btcbot.hl_traders scan; used instead of the leaderboard while fresh
         self.session = requests.Session()
 
     def mids(self) -> dict[str, float]:
@@ -276,6 +280,13 @@ class HLMarket:
         return {d.strftime("%Y-%m-%d"): v for d, v in parse_fng(resp.json()).items()}
 
     def leaderboard(self) -> list[dict]:
+        """The steady traders in our coins from the daily scan (under 48 hours old), else the plain
+        leaderboard's top 30-day PnL."""
+        f = self.traders_file
+        if f and f.exists() and time.time() - f.stat().st_mtime < 48 * 3600:
+            rows = json.loads(f.read_text())
+            if rows:
+                return rows
         cache = self.cache_dir / "leaderboard.json" if self.cache_dir else None
         if cache and cache.exists() and time.time() - cache.stat().st_mtime < 12 * 3600:
             return json.loads(cache.read_text())
@@ -653,7 +664,7 @@ class AITrader:
         self._append("whales.csv", {"time": str(self.now), "totals": json.dumps(totals),
                                     "changes": json.dumps(changes[:20])})
         return {"our_coins": totals, "changes_since_last_decision": changes[:20],
-                "accounts": [{k: a[k] for k in ("address", "account_value", "pnl_30d", "roi_30d")}
+                "accounts": [{k: a[k] for k in ("address", "account_value", "pnl_30d", "roi_30d", "pnl_by_coin") if k in a}
                              | {"biggest_positions": a["positions"][:4] if isinstance(a["positions"], list)
                                 else a["positions"]} for a in accounts]}
 
@@ -841,9 +852,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--slots", default=",".join(map(str, DEFAULT_SLOTS_JST)),
                    help="decision hours in Japan time, e.g. 9,21 (default: every hour)")
     p.add_argument("--no-claude", action="store_true", help="only manage open trades, never ask Claude")
+    p.add_argument("--traders", default="data/hl-traders/latest.json",
+                   help="accounts to watch from python -m btcbot.hl_traders (falls back to the leaderboard)")
     a = p.parse_args(argv)
     folder = Path(a.folder)
-    market = HLMarket(cache_dir=folder)
+    market = HLMarket(cache_dir=folder, traders_file=Path(a.traders))
     if a.command == "status":
         t = AITrader(folder, market)
         print(json.dumps({**t.state, "equity": round(t.equity(market.mids()), 2)}, indent=2, default=str))
