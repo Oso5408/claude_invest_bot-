@@ -362,3 +362,22 @@ def test_copy_traders_file_and_small_moves(tmp_path):
     m.held["0xmine"] = [{"coin": "ETH", "size": 1.0, "entry": 3000.0, "value_usd": 3000}]  # under 10k USD
     t.step(T0.replace(minute=7))
     assert not (tmp_path / "copy_alerts.csv").exists()
+
+
+def test_report_has_copy_trader_section(tmp_path):
+    now = datetime(2026, 10, 16, 0, 35, tzinfo=timezone.utc)
+    pd.DataFrame([{"coin": "SOL", "side": "long", "strategy": "copy 0x405e", "opened": "2026-10-15T01:00:00+00:00",
+                   "closed": "2026-10-15T20:00:00+00:00", "pnl_usd": 2.5},
+                  {"coin": "ADA", "side": "long", "strategy": "breakout", "opened": "2026-10-10T01:00:00+00:00",
+                   "closed": "2026-10-11T01:00:00+00:00", "pnl_usd": -1.0}]).to_csv(tmp_path / "trades.csv", index=False)
+    pd.DataFrame([{"time": "2026-10-15T01:00:00+00:00", "slot": "2026-10-15T1000-copy",
+                   "trigger": "copy: 0x405eafc7 opened long SOL", "new_trades": 1, "summary": "followed",
+                   "coin_views": "[]", "whales": "", "error": "", "cost_usd": 0.04}]).to_csv(tmp_path / "decisions.csv", index=False)
+    pd.DataFrame([{"time": "2026-10-15T00:58:00+00:00", "account": "0x405eafc7", "coin": "SOL", "change": "opened long",
+                   "size_before": 0, "size_now": 200, "change_usd": 30000}]).to_csv(tmp_path / "copy_alerts.csv", index=False)
+    (tmp_path / "state.json").write_text(json.dumps({"positions": [{"coin": "ETH", "strategy": "copy 0xb69e"}]}))
+    text = ai.report_text(tmp_path, now)
+    assert "COPY TRADERS" in text and "opened long" in text and "followed" in text and "copy 0xb69e" in text
+    assert "Copied trades closed so far: 1 trades, total +2.50 USD, win rate 100%; in the last 24h: 1 trades" in text
+    assert "own (not copied) trades so far: 1 trades, total -1.00 USD" in text
+    assert "跟單大戶" in ai.REPORT_SYSTEM

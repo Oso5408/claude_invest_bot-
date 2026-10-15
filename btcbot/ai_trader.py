@@ -178,11 +178,14 @@ style), in at most 4 short sentences, explain why it won or lost: was the idea r
 stop placement, timing, costs or funding, or just noise. Be honest; one trade proves little."""
 
 REPORT_SYSTEM = """You write the daily report of an AI-run paper-trading account (fake money) for its owner, \
-who reads Traditional Chinese (Hong Kong style). Plain sentences, under 500 words. Cover: equity now and \
+who reads Traditional Chinese (Hong Kong style). Plain sentences, under 600 words. Cover: equity now and \
 change since yesterday and since the 200 USD start; every trade closed in the last 24 hours with what \
 strategy it used, the result in USD, and why it won or lost (use the reviews given); open trades; what the \
 AI decided at each decision time (all times are Japan time, JST; never call them Hong Kong time) and why, including its view on each coin (long / short / no trade and \
-which strategy fits) and what the big Hyperliquid accounts were doing (opened, closed, flipped); which \
+which strategy fits) and what the big Hyperliquid accounts were doing (opened, closed, flipped); a \
+section headed 跟單大戶 from the COPY TRADERS facts: what the five copy traders did in our coins in the last \
+24 hours, whether the AI followed each move and why, copied trades still open, and copied trades' results \
+so far next to the AI's own trades (say "no moves" if there were none); which \
 trading guides (skills) the AI read at each decision; the API cost so far. Compare with the rule-based 4h breakout \
 accounts if their numbers are given. Be honest that a few trades prove nothing. Do not recommend \
 real-money trading."""
@@ -871,12 +874,7 @@ def report_text(folder: Path, now: datetime, data_dir: Path | None = None) -> st
         d.insert(0, "time_jst", when[when >= since].dt.tz_convert("Asia/Tokyo").dt.strftime("%m-%d %H:%M"))
         d = d.drop(columns=["time"])
         parts.append("Decisions in the last 24h (times in JST):\n" + (d.to_csv(index=False) if len(d) else "none"))
-    ca_path = folder / "copy_alerts.csv"
-    if ca_path.exists():
-        c = pd.read_csv(ca_path)
-        c = c[pd.to_datetime(c["time"], utc=True, format="ISO8601") >= since]
-        parts.append("Copy traders' moves in our coins in the last 24h (each one asked the AI at once; its "
-                     "answer is the decision with trigger 'copy: ...'):\n" + (c.to_csv(index=False) if len(c) else "none"))
+    parts.append(copy_section(folder, st, since))
     sk_path = folder / "skills.csv"
     if sk_path.exists():
         k = pd.read_csv(sk_path, keep_default_na=False)
@@ -892,6 +890,35 @@ def report_text(folder: Path, now: datetime, data_dir: Path | None = None) -> st
                 parts.append(f"Rule-based account {f.parent.name}: equity {e['equity'].iloc[-1]} USD, "
                              f"closed trades so far {n}.")
     return "\n\n".join(parts)
+
+
+def copy_section(folder: Path, st: dict, since: pd.Timestamp) -> str:
+    """Facts for the report's copy-trader section: their moves, the AI's answers, and how copied trades did."""
+    out = ["COPY TRADERS (the five swing traders the AI is alerted about):"]
+    ca_path, dc_path, tr_path = folder / "copy_alerts.csv", folder / "decisions.csv", folder / "trades.csv"
+    moves = pd.read_csv(ca_path) if ca_path.exists() else pd.DataFrame()
+    if len(moves):
+        moves = moves[pd.to_datetime(moves["time"], utc=True, format="ISO8601") >= since]
+    out.append("Their moves in our coins in the last 24h:\n" + (moves.to_csv(index=False) if len(moves) else "none"))
+    if dc_path.exists():
+        d = pd.read_csv(dc_path, keep_default_na=False)
+        if "trigger" in d:
+            d = d[d["trigger"].astype(str).str.startswith("copy")
+                  & (pd.to_datetime(d["time"], utc=True, format="ISO8601") >= since)]
+            out.append("The AI's answer to each alert (new_trades = trades it opened):\n"
+                       + (d[["time", "trigger", "new_trades", "summary"]].to_csv(index=False) if len(d) else "none"))
+    is_copy = lambda strat: strat.astype(str).str.lower().str.startswith("copy")
+    open_copies = [p for p in st.get("positions", []) if str(p.get("strategy", "")).lower().startswith("copy")]
+    out.append("Copied trades still open: " + (json.dumps(open_copies, default=str) if open_copies else "none"))
+    if tr_path.exists():
+        t = pd.read_csv(tr_path)
+        mine, copied = t[~is_copy(t["strategy"])], t[is_copy(t["strategy"])]
+        closed = pd.to_datetime(t["closed"], utc=True, format="ISO8601")
+        stat = lambda x: (f"{len(x)} trades, total {x['pnl_usd'].sum():+.2f} USD, "
+                          f"win rate {(x['pnl_usd'] > 0).mean():.0%}" if len(x) else "no trades")
+        out.append(f"Copied trades closed so far: {stat(copied)}; in the last 24h: "
+                   f"{stat(copied[closed[copied.index] >= since])}. The AI's own (not copied) trades so far: {stat(mine)}.")
+    return "\n".join(out)
 
 
 def daily_report(folder: Path, brain, now: datetime | None = None, data_dir: Path | None = None) -> Path:
