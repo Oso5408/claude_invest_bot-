@@ -83,7 +83,8 @@ def test_losing_or_rare_traders_in_our_coins_are_dropped():
         {"address": "0xa", "equity": 1e5, "our_share": 0.9, "our_fills": 100, "our_pnl_30d": -5000},
         {"address": "0xb", "equity": 1e5, "our_share": 0.9, "our_fills": 7, "our_pnl_30d": 5000},
         {"address": "0xc", "equity": 1e5, "our_share": 0.9, "our_fills": 30, "our_pnl_30d": 1000},
-        {"address": "0xd", "equity": 1e4, "our_share": 0.5, "our_fills": 30, "our_pnl_30d": 1000}])
+        {"address": "0xd", "equity": 1e4, "our_share": 0.5, "our_fills": 30, "our_pnl_30d": 1000},
+        {"address": "0xe", "equity": 1e6, "our_share": 0.6, "our_fills": 500, "our_pnl_30d": 396}])  # 0.04%
     assert list(ht.ours(checked)["address"]) == ["0xd", "0xc"]
 
 
