@@ -269,6 +269,14 @@ cat data/ai-hl/trades.csv                                          # 每單結�
 cat data/ai-hl/reports/$(date +%F).md                              # 今日日報
 ```
 
+**規則帳戶自我測試**（4h 突破會唔會入場、移動止蝕同平倉，唔使錢、唔使上網）：
+
+```bash
+cd ~/claude_invest_bot- && .venv/bin/python -m btcbot.rule_selftest
+```
+
+用假 ADA 價試三個市況（突破做多、恐懼時跌穿、貪婪時跌穿），用 paper-hl-2x-fng 同 paper-hl-1x-long 嘅設定，最後一行顯示 `ALL OK` 就代表全部正常。
+
 AI 落單時可以揀移動止蝕（`trailing_atr_mult`，回測嘅 4h 突破用 2）：每支 4h K 線收市後，止蝕會移到入場以來最好價格減 2 倍 ATR，只會向有利方向移。trades.csv 會記錄 `trailing_stop` 平倉。
 
 想暫停開新單：`touch data/ai-hl/PAUSE`（已有嘅單照樣會止蝕）。刪咗個檔案就恢復。
