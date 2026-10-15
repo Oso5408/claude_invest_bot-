@@ -5,7 +5,7 @@ each account enter (or correctly stay out), does the 2x ATR trailing stop follow
 The accounts use the same settings as the VM crontab (docs/gcp-setup.md):
 - paper-hl-2x-fng: both sides, up to 2x, shorts only when Fear & Greed <= 50
 - paper-hl-1x-long: long only, 1x
-Three made-up markets, each run through the real PaperTrader every 30 minutes, reloaded from disk like cron:
+Three made-up markets, each run through the real PaperTrader every hour, reloaded from disk like cron:
 - breakout-long: ADA breaks its 4h 20-bar high on 3x volume, trends up 24h, then drops back
 - breakdown-short-fear: ADA breaks its 4h 10-bar low with Fear & Greed 30, falls 24h, then bounces
 - breakdown-short-greed: the same fall with Fear & Greed 75 (the 2x-fng account must not short)
@@ -76,7 +76,8 @@ class ScenarioFeed:
 
     def candles(self, interval, now, days):
         self.now = pd.Timestamp(now)
-        m = self.m[self.m.index < self.now]
+        i = self.m.index
+        m = self.m[(i < self.now) & (i >= self.now - pd.Timedelta(days=days + 1))]  # only what the API would send
         rule = {"1min": "1min", "1hour": "1h"}[interval]
         return m.resample(rule, label="left", closed="left").agg(
             {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
@@ -99,7 +100,7 @@ def run_account(account: str, scenario: str) -> dict:
     cfg = PaperConfig(symbol="ADA", initial_jpy=200.0, history_days=6, **ACCOUNTS[account])
     with tempfile.TemporaryDirectory() as tmp:
         folder = Path(tmp)
-        for t in pd.date_range(START + pd.Timedelta(days=3), m.index[-1], freq="30min"):
+        for t in pd.date_range(START + pd.Timedelta(days=5), m.index[-1], freq="1h"):
             PaperTrader(folder, cfg, account_config(200.0)).step(feed, t.to_pydatetime())  # reload like cron
         sig = pd.read_csv(folder / "signals.csv")
         eq = pd.read_csv(folder / "equity.csv")
@@ -123,9 +124,11 @@ def run_account(account: str, scenario: str) -> dict:
 
 
 def main() -> None:
-    results = [run_account(a, s) for s in SCENARIOS for a in ACCOUNTS]
-    for r in results:
-        print(json.dumps(r, ensure_ascii=False, default=str))
+    results = []
+    for n, (s, a) in enumerate([(s, a) for s in SCENARIOS for a in ACCOUNTS], 1):
+        print(f"[{n}/{len(SCENARIOS) * len(ACCOUNTS)}] {a} / {s} ...", flush=True)
+        results.append(run_account(a, s))
+        print(json.dumps(results[-1], ensure_ascii=False, default=str), flush=True)
     print("ALL OK" if all(r["ok"] for r in results) else "SOME CHECKS FAILED")
 
 
