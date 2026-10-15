@@ -11,7 +11,7 @@ balance makes it huge (the first scan's top ROI, +2264%, was 2,264 USD on a 235k
 
 Step 2, for the best --candidates (default 100): their fills of the last 30 days (userFillsByTime) and
 open positions (clearinghouseState). Keep those with at least 20% of their traded volume and 20 fills in
-our coins and a realized profit in them, ranked by that profit / equity ("our_return").
+our coins and a realized profit in them of at least 1% of equity, ranked by that profit / equity ("our_return").
 It also lists what every checked account trades (all coins), per account and summed over all of them.
 
 The best --keep (default 20) go to data/hl-traders/latest.json; the AI paper account watches those
@@ -41,6 +41,7 @@ MAX_EQUITY = 50_000_000
 MAX_TURNOVER = 100  # monthly volume / equity; above this it is market making / HFT, not copyable
 MIN_OUR_SHARE = 0.2
 MIN_OUR_FILLS = 20
+MIN_OUR_RETURN = 0.01  # realized profit in our coins at least 1% of equity
 MIN_EARLIER_PNL = 0.1  # share of 30-day PnL made before the last 7 days
 LATEST = Path("data/hl-traders/latest.json")
 
@@ -136,7 +137,7 @@ def ours(checked: pd.DataFrame) -> pd.DataFrame:
     if checked.empty or "our_share" not in checked:
         return checked.iloc[0:0]
     m = ((checked["our_share"] >= MIN_OUR_SHARE) & (checked["our_fills"] >= MIN_OUR_FILLS)
-         & (checked["our_pnl_30d"] > 0))
+         & (checked["our_pnl_30d"] >= MIN_OUR_RETURN * checked["equity"]))
     good = checked[m].assign(our_return=checked["our_pnl_30d"] / checked["equity"])
     return good.sort_values("our_return", ascending=False)
 
@@ -180,7 +181,7 @@ def coin_label(coin: str) -> str:
 def report(lb: pd.DataFrame, checked: pd.DataFrame, top: int = 20) -> str:
     good = ours(checked)
     lines = [f"{len(lb)} accounts on the leaderboard, {len(checked)} steady winners checked, "
-             f"{len(good)} trade our coins with a profit (>= {MIN_OUR_SHARE:.0%} of volume, >= {MIN_OUR_FILLS} fills "
+             f"{len(good)} trade our coins with a profit of >= {MIN_OUR_RETURN:.0%} of equity (>= {MIN_OUR_SHARE:.0%} of volume, >= {MIN_OUR_FILLS} fills "
              "in 30 days), best realized profit / equity first", ""]
     for r in good.head(top).itertuples(index=False):
         coins = ", ".join(f"{c} {int(getattr(r, 'pnl_' + c)):+,}" for c in COINS if getattr(r, "pnl_" + c))
@@ -190,7 +191,8 @@ def report(lb: pd.DataFrame, checked: pd.DataFrame, top: int = 20) -> str:
         lines.append(f"    our coins {r.our_share:.0%} of volume, {int(r.our_fills)} fills, win {win}, realized 30d {coins or 0}"
                      f"{' (fills capped at 2000)' if r.fills_capped else ''}")
         lines.append(f"    most traded: {r.top_coins}")
-        lines.append(f"    holds now: {r.holds_now or 'nothing in our coins'}")
+        held = "lookup failed" if pd.isna(r.holds_now) else (r.holds_now or "nothing in our coins")
+        lines.append(f"    holds now: {held}")
     table = coin_table(checked)
     lines += ["", f"What all {len(checked)} steady winners traded in 30 days (top 25 by number of traders):",
               f"{'coin':<20}{'traders':>8}{'in profit':>10}{'volume':>8}{'realized PnL':>16}"]
