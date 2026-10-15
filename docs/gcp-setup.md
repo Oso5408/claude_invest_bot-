@@ -271,6 +271,14 @@ cat data/ai-hl/reports/$(date +%F).md                              # 今日日�
 
 想暫停開新單：`touch data/ai-hl/PAUSE`（已有嘅單照樣會止蝕）。刪咗個檔案就恢復。
 
+**自我測試（有訊號時 AI 會唔會用啱策略同落單）：**
+
+```bash
+cd ~/claude_invest_bot- && . $HOME/.anthropic_env && .venv/bin/python -m btcbot.ai_selftest
+```
+
+用假市況試兩次：SOL 4h 帶量突破（做多），同埋 ETH 4h 帶量跌穿而恐懼貪婪指數 75（做空）。每次問 Claude 一次（大約 0.05 美元），之後將價格推到止賺或者止蝕，睇 5 分鐘檢查會唔會平倉。喺臨時資料夾行，唔會掂到 data/ai-hl。加 `--no-claude` 就用固定指令代替 Claude，唔使錢，只試程式。
+
 ## 13. Telegram 指令
 
 用返第 11 節嗰個 Watchdog bot，喺 Telegram 打指令就可以睇帳戶同 VM 狀態。所有指令都只係睇，唔會改任何檔案、唔會落單。bot 只會回應 `TELEGRAM_CHAT_ID` 嗰個 chat，其他人打嚟一律唔理，只會記低喺 log。佢主動問 Telegram 有冇新訊息，所以 VM 唔使開任何 port。唔用 Claude API，冇額外費用。
