@@ -18,7 +18,9 @@ Which guides it read at each decision goes to skills.csv and the daily report.
 Each `python -m btcbot.ai_trader step` (cron, every 5 minutes):
 1. Checks stop loss / take profit / time limit of open trades against every 1 minute candle since the
    last run, charges the hourly funding and the taker fee, and asks Claude why a closed trade won or lost.
-2. Once an hour (the first run after each full hour) asks Claude what to do. Claude can look at
+2. Checks the copy traders (COPY_TRADERS, or copy_traders.json in the folder): when one of them opens,
+   closes or flips a position of COPY_MIN_USD or more in our coins, Claude is asked at once (logged in
+   copy_alerts.csv); otherwise once an hour (the first run after each full hour) Claude is asked what to do. Claude can look at
    candles, funding, the Fear & Greed Index, the positions of the top Hyperliquid accounts ("big
    sharks") and the web, then open or close trades through tools, or do nothing.
 3. Appends to equity.csv; trades.csv holds every closed trade with Claude's reasons and the review.
@@ -54,6 +56,14 @@ SLIPPAGE = 0.0005
 INITIAL_USD = 200.0
 DEFAULT_SLOTS_JST = tuple(range(24))  # every hour
 LEADERBOARD_URL = "https://stats-data.hyperliquid.xyz/Mainnet/leaderboard"
+# swing traders oso01 picked on 2026-10-15; btcbot.copy_backtest: copying them an hour late in our coins made
+# +1.65% per trade after costs over the 31-90 days before they were picked (82 trades), 0x405e the most
+COPY_TRADERS: Final[tuple[str, ...]] = (
+    "0x28280399d9afd68a3555c65ca6a75a1bd55693a0", "0x405eafc7534c349d5803b206a7cf5f0ab7686af4",
+    "0xb69eec8fea0081343c3b09e652ba1fa7dcf7033a", "0x07eac6dc2af876d2f0402f6804cc6ceaa0cd20cd",
+    "0xa2e366c4e2d453cab49cc9c64f0670fd2fd060a3")
+COPY_MIN_USD = 10_000.0
+COPY_EVENTS = ("opened long", "opened short", "closed long", "closed short", "flipped to long", "flipped to short")
 JST = timezone(timedelta(hours=9))
 DECISION_MODEL = "claude-sonnet-5-5"  # trading decisions
 WRITER_MODEL = "claude-haiku-5-5"  # trade reviews and the daily report
@@ -128,6 +138,17 @@ the whole leaderboard: steady winners (up on the week, month and all time) with 
 coins over 30 days; their pnl_30d and roi_30d are that profit in our coins and its share of their equity. \
 If the scan is missing they are the leaderboard's top 30-day PnL instead (no pnl_by_coin field). Say what \
 they seem to be doing and whether it is worth following; they can be hedging or just lucky. get_whale_positions shows more detail.
+4. The copy traders (copy_traders in the context): five swing traders your owner picked. They hold 1 to 5 \
+days, mostly buy strength with the 7-day trend and add to winners, and use limit orders. A backtest of \
+copying their trades in our coins an hour late, with our costs, made about +1.6% per trade over the two \
+months before they were picked (82 trades, win rate about 49%, so a few big winners carry it; most of it \
+from 0x405e and 0xb69e). Their profit in other coins can't be copied. When copy_traders.alerts_now is not \
+empty you were called because one of them just opened, closed or flipped a position: decide whether to \
+follow (same side, name the strategy "copy 0x..." with the first 6 characters of the address) or not, and \
+say why. They use no stop that we can see, but you must: set it wide enough for a multi-day swing (for \
+example 2 to 3 ATR on 4h) and consider a trailing stop. When one of them closes a position you copied, \
+consider closing yours. Copying is not required; skip a trade that looks bad on the chart or would use \
+the last trade of the day on a weak idea.
 Then open a trade only where you see a real edge after costs; doing nothing is fine when nothing stands \
 out. Name the strategy and give your reason on every order; your owner reads them in the daily report.
 
@@ -387,9 +408,14 @@ class Brain:
 
 # ---------- the account ----------
 class AITrader:
-    def __init__(self, folder: Path, market, brain=None, slots_jst: tuple[int, ...] = DEFAULT_SLOTS_JST):
+    def __init__(self, folder: Path, market, brain=None, slots_jst: tuple[int, ...] = DEFAULT_SLOTS_JST,
+                 copy_traders: tuple[str, ...] | None = None):
         self.folder = Path(folder)
         self.folder.mkdir(parents=True, exist_ok=True)
+        if copy_traders is None:
+            f = self.folder / "copy_traders.json"  # a list of addresses, to change who is copied without code
+            copy_traders = tuple(json.loads(f.read_text())) if f.exists() else COPY_TRADERS
+        self.copy_traders = tuple(copy_traders)
         self.market = market
         self.brain = brain
         self.slots = tuple(sorted(slots_jst))
@@ -400,6 +426,7 @@ class AITrader:
         self.now = datetime.now(timezone.utc)
         self._mids: dict[str, float] = {}
         self._skills_read: list[str] = []
+        self._copy_alerts: list[dict] = []
 
     def _save(self) -> None:
         tmp = self.state_path.with_suffix(".tmp")
@@ -598,7 +625,10 @@ class AITrader:
                 "guides_read_today": self._guides_today(),
                 "regime_detection_guide": self._auto_guide("regime-detection"),
                 "market_overview": self._overview(mids),
-                "big_accounts": self._whale_watch()}
+                "big_accounts": self._whale_watch(),
+                "copy_traders": {"alerts_now": self._copy_alerts,
+                                 "positions_in_our_coins": {a[:10]: {c: v for c, v in pos.items() if v}
+                                                            for a, pos in self.state.get("copy_snapshot", {}).items()}}}
 
     def _fear_greed(self):
         try:
@@ -685,6 +715,23 @@ class AITrader:
             out.append({**r, "positions": pos})
         return out
 
+    def _copy_check(self) -> list[dict]:
+        """Positions the copy traders opened, closed or flipped in our coins since the last run (every 5
+        minutes). The first run only takes a snapshot; an address that can't be read keeps its old one."""
+        old = self.state.get("copy_snapshot", {})
+        new = dict(old)
+        for addr in self.copy_traders:
+            try:
+                new[addr] = {p["coin"]: p["size"] for p in self.market.positions(addr) if p["coin"] in COINS}
+            except Exception:
+                continue
+        new = {a: v for a, v in new.items() if a in self.copy_traders}
+        self.state["copy_snapshot"] = new
+        alerts = [c for c in whale_changes(old, new, self._mids, COPY_MIN_USD) if c["change"] in COPY_EVENTS]
+        for c in alerts:
+            self._append("copy_alerts.csv", {"time": str(self.now), **c})
+        return alerts
+
     def _handlers(self) -> dict:
         now = pd.Timestamp(self.now)
         def get_candles(coin, interval, bars):
@@ -720,7 +767,13 @@ class AITrader:
         self._mids = self.market.mids()
         notes = self._manage(last)
 
-        slot = self._due_slot()
+        self._copy_alerts = self._copy_check() if self.copy_traders else []
+        slot, trigger = self._due_slot(), "hourly"
+        held = {p["coin"] for p in s["positions"]}
+        wake = [c for c in self._copy_alerts if not c["change"].startswith("closed") or c["coin"] in held]
+        if wake:  # a close of a coin we don't hold is only logged
+            trigger = "copy: " + "; ".join(f"{c['account']} {c['change']} {c['coin']}" for c in wake)
+            slot = slot or f"{self._day()}T{self.now.astimezone(JST):%H%M}-copy"
         if slot:
             s["slots_done"] = [k for k in s["slots_done"] if k >= self._day()] + [slot]
             self._save()  # a crash mid-decision must not repeat the call on the next run
@@ -741,7 +794,7 @@ class AITrader:
                     out = {"summary": out}
                 summary = out.get("summary", "")
                 spent = self.brain.cost - cost0
-                self._append("decisions.csv", {"time": str(self.now), "slot": slot,
+                self._append("decisions.csv", {"time": str(self.now), "slot": slot, "trigger": trigger,
                                                "new_trades": s["next_id"] - before, "summary": summary,
                                                "coin_views": json.dumps(out.get("coins", []), ensure_ascii=False),
                                                "whales": out.get("whales", ""),
@@ -818,6 +871,12 @@ def report_text(folder: Path, now: datetime, data_dir: Path | None = None) -> st
         d.insert(0, "time_jst", when[when >= since].dt.tz_convert("Asia/Tokyo").dt.strftime("%m-%d %H:%M"))
         d = d.drop(columns=["time"])
         parts.append("Decisions in the last 24h (times in JST):\n" + (d.to_csv(index=False) if len(d) else "none"))
+    ca_path = folder / "copy_alerts.csv"
+    if ca_path.exists():
+        c = pd.read_csv(ca_path)
+        c = c[pd.to_datetime(c["time"], utc=True, format="ISO8601") >= since]
+        parts.append("Copy traders' moves in our coins in the last 24h (each one asked the AI at once; its "
+                     "answer is the decision with trigger 'copy: ...'):\n" + (c.to_csv(index=False) if len(c) else "none"))
     sk_path = folder / "skills.csv"
     if sk_path.exists():
         k = pd.read_csv(sk_path, keep_default_na=False)

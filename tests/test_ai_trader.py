@@ -308,3 +308,57 @@ def test_market_watches_the_daily_trader_scan(tmp_path, monkeypatch):
     monkeypatch.setattr(m.session, "get", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("leaderboard")))
     with pytest.raises(RuntimeError, match="leaderboard"):
         m.leaderboard()
+
+
+class CopyMarket(FakeMarket):
+    """The copy traders' positions can be changed between runs."""
+
+    def __init__(self):
+        super().__init__()
+        self.held = {}  # address -> list of positions
+
+    def positions(self, address):
+        return self.held.get(address, [])
+
+
+def test_copy_trader_move_asks_claude_at_once(tmp_path):
+    m, who = CopyMarket(), ai.COPY_TRADERS[1]
+    seen = []
+
+    class Brain(ScriptBrain):
+        def run(self, context, handlers):
+            seen.append(context["copy_traders"])
+            return super().run(context, handlers)
+
+    brain = Brain([])
+    t = ai.AITrader(tmp_path, m, brain)
+    t.step(T0)  # 09:02 JST: hourly decision, first copy snapshot (no alert)
+    assert brain.calls == 1 and seen[0]["alerts_now"] == []
+    m.held[who] = [{"coin": "SOL", "size": 200.0, "entry": 150.0, "value_usd": 30000}]
+    m.held[ai.COPY_TRADERS[0]] = [{"coin": "ZEC", "size": 999.0, "entry": 50.0, "value_usd": 50000}]  # not ours
+    t.step(T0.replace(minute=7))  # same hour, but a copy trader opened SOL long
+    assert brain.calls == 2
+    assert seen[1]["alerts_now"] == [{"account": who[:10], "coin": "SOL", "change": "opened long", "size_before": 0.0,
+                                      "size_now": 200.0, "change_usd": 30000}]
+    assert seen[1]["positions_in_our_coins"][who[:10]] == {"SOL": 200.0}
+    d = pd.read_csv(tmp_path / "decisions.csv")
+    assert d["trigger"].iloc[-1] == f"copy: {who[:10]} opened long SOL" and d["slot"].iloc[-1].endswith("0907-copy")
+    t.step(T0.replace(minute=12))  # nothing changed
+    assert brain.calls == 2
+    m.held[who] = []
+    t.step(T0.replace(minute=17))  # closed, but we hold no SOL: logged, Claude not asked
+    assert brain.calls == 2
+    alerts = pd.read_csv(tmp_path / "copy_alerts.csv")
+    assert list(alerts["change"]) == ["opened long", "closed long"]
+    assert "closed long" in ai.report_text(tmp_path, T0.replace(minute=20))
+
+
+def test_copy_traders_file_and_small_moves(tmp_path):
+    (tmp_path / "copy_traders.json").write_text('["0xmine"]')
+    m = CopyMarket()
+    t = ai.AITrader(tmp_path, m, None)
+    assert t.copy_traders == ("0xmine",)
+    t.step(T0)
+    m.held["0xmine"] = [{"coin": "ETH", "size": 1.0, "entry": 3000.0, "value_usd": 3000}]  # under 10k USD
+    t.step(T0.replace(minute=7))
+    assert not (tmp_path / "copy_alerts.csv").exists()
