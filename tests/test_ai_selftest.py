@@ -10,20 +10,33 @@ NOW = datetime(2026, 10, 15, 8, 30, tzinfo=timezone.utc)
 
 
 @pytest.mark.parametrize("name", list(st.SCENARIOS))
-def test_signal_reaches_context_order_opens_and_take_profit_closes(name):
+def test_rule_follower_passes_every_scenario(name):
+    """The made-up markets are labelled right: following the tested rules gets every answer."""
     sc = st.SCENARIOS[name]
-    out = st.run_scenario(name, st.ScriptedBrain(name), now=NOW)
-    sig = out["signal_in_context"]
-    if sc["side"] == "long":
-        assert sig["close"] > sig["donchian20_high"] and sig["trend"] == "up"
-    else:
-        assert sig["close"] < sig["donchian10_low"] and sig["trend"] == "down"
-    assert sig["volume_ratio20"] >= 2
-    [o] = out["orders"]
-    assert (o["coin"], o["side"]) == (sc["coin"], sc["side"]) and out["orders_ok"]
-    assert out["trades_left_today"] == ai.MAX_ENTRIES_PER_DAY - 1
-    [c] = out["closed"]
-    assert c["exit_reason"] == "take_profit" and c["strategy"] == "4h Donchian breakout" and c["pnl_usd"] > 0
+    out = st.run_scenario(name, st.ScriptedBrain(), now=NOW)
+    assert out["passed"], out
+    seen = out.get("market_seen")
+    if sc["kind"] == "breakout":
+        assert seen["close"] > seen["donchian20_high"] and seen["volume_ratio20"] == pytest.approx(sc["volume"], abs=0.05)
+    if sc["kind"] in ("breakout", "breakdown"):  # just past the channel, not an obvious move
+        edge = seen["donchian20_high"] if sc["kind"] == "breakout" else seen["donchian10_low"]
+        assert abs(seen["close"] / edge - 1) < 0.01 and 30 < seen["rsi14"] < 70
+    if sc["kind"] == "wick":
+        assert seen["close"] < seen["donchian20_high"]
+    if out["orders"]:
+        assert out["orders_ok"] and out["closed"]
+
+
+def test_ai_that_trades_everything_fails_the_traps():
+    class Eager(st.ScriptedBrain):
+        def run(self, context, handlers):
+            px = context["prices"]["SOL"]
+            handlers["place_order"](coin="SOL", side="long", margin_usd=20, leverage=2, stop_price=px * 0.97,
+                                    take_profit_price=0, max_hold_hours=0, strategy="s", reason="r")
+            return {"summary": "", "coins": []}
+    assert not st.run_scenario("fake-breakout-wick", Eager(), now=NOW)["passed"]
+    out = st.run_scenario("quiet-breakout-long", Eager(), now=NOW)
+    assert not out["passed"] and out["other_trades"] == ["SOL"]
 
 
 def test_stop_closes_when_there_is_no_take_profit():
@@ -33,7 +46,7 @@ def test_stop_closes_when_there_is_no_take_profit():
             handlers["place_order"](coin="SOL", side="long", margin_usd=20, leverage=3, stop_price=px * 0.97,
                                     take_profit_price=0, max_hold_hours=0, strategy="s", reason="r")
             return {"summary": "", "coins": []}
-    out = st.run_scenario("breakout-long", NoTP("breakout-long"), now=NOW)
+    out = st.run_scenario("quiet-market", NoTP("quiet-market"), now=NOW)
     [c] = out["closed"]
     assert c["exit_reason"] == "stop_loss" and c["pnl_usd"] < 0
 
@@ -47,19 +60,19 @@ def test_over_limit_order_from_the_ai_is_rejected():
                     handlers["place_order"](coin="SOL", side="long", stop_price=px * 0.97, take_profit_price=0,
                                             max_hold_hours=0, strategy="s", reason="r", **kw)
             return {"summary": "", "coins": []}
-    out = st.run_scenario("breakout-long", Greedy("breakout-long"), now=NOW)
+    out = st.run_scenario("quiet-market", Greedy("quiet-market"), now=NOW)
     assert out["orders"] == [] and out["trades_left_today"] == ai.MAX_ENTRIES_PER_DAY
 
 
 def test_scenario_market_is_made_up_but_scaled_to_live_prices():
-    m = st.ScenarioMarket(pd.Timestamp(NOW), "breakdown-short", {"ETH": 4000.0})
+    m = st.ScenarioMarket(pd.Timestamp(NOW), "breakdown-short-greed", {"ETH": 4000.0})
     assert m.mids()["ETH"] == pytest.approx(4000.0)
-    assert list(m.fear_greed().values())[-1] == 75.0
+    assert list(m.fear_greed().values())[-1] == 72.0
 
 
 def test_trailing_stop_follows_the_trend_then_closes_in_profit(tmp_path):
     now = pd.Timestamp(NOW).floor("4h") + pd.Timedelta(minutes=2)
-    market = st.ScenarioMarket(now, "breakout-long")
+    market = st.ScenarioMarket(now, "quiet-market")
 
     class Trail(st.ScriptedBrain):
         def run(self, context, handlers):
@@ -69,7 +82,7 @@ def test_trailing_stop_follows_the_trend_then_closes_in_profit(tmp_path):
                                     take_profit_price=0, max_hold_hours=0, strategy="4h breakout", reason="r",
                                     trailing_atr_mult=2)
             return {"summary": "", "coins": []}
-    t = ai.AITrader(tmp_path, market, Trail("breakout-long"))
+    t = ai.AITrader(tmp_path, market, Trail("quiet-market"))
     t.step(now.to_pydatetime())
     [pos] = t.state["positions"]
     first_stop, entry = pos["stop"], pos["entry"]
@@ -98,4 +111,4 @@ def test_trailing_mult_is_checked():
                                         stop_price=context["prices"]["SOL"] * 0.97, take_profit_price=0,
                                         max_hold_hours=0, strategy="s", reason="r", trailing_atr_mult=-1)
             return {"summary": "", "coins": []}
-    assert st.run_scenario("breakout-long", Bad("breakout-long"), now=NOW)["orders"] == []
+    assert st.run_scenario("quiet-market", Bad("quiet-market"), now=NOW)["orders"] == []

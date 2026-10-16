@@ -295,7 +295,19 @@ AI 落單時可以揀移動止蝕（`trailing_atr_mult`，回測嘅 4h 突破用
 cd ~/claude_invest_bot- && . $HOME/.anthropic_env && .venv/bin/python -m btcbot.ai_selftest
 ```
 
-用假市況試兩次：SOL 4h 帶量突破（做多），同埋 ETH 4h 帶量跌穿而恐懼貪婪指數 75（做空）。每次問 Claude 一次（大約 0.05 美元），之後將價格推到止賺或者止蝕，睇 5 分鐘檢查會唔會平倉。喺臨時資料夾行，唔會掂到 data/ai-hl。加 `--no-claude` 就用固定指令代替 Claude，唔使錢，只試程式。
+用 7 個唔太明顯嘅假市況考 AI（AI 只睇到市況，唔知考緊咩）：
+
+| 市況 | 應該 |
+|---|---|
+| NEAR 啱啱收高過 20 根高位 0.6%，成交 1.6 倍 | 做多 |
+| ADA 啱啱跌穿 10 根低位，恐懼貪婪 28 | 做空 |
+| BTC 一樣跌穿，但恐懼貪婪 72 | 唔做 |
+| SOL 插針高過 20 根高位但收返入去，成交 2 倍 | 唔做 |
+| ETH 突破但成交得 0.8 倍 | 唔做 |
+| 全部幣都冇訊號 | 唔做 |
+| 跟單大戶開 HYPE 25 萬美元多單 | 做多 |
+
+每個市況問 Claude 一次（全部大約 0.35 美元），有落單就將價格推到止賺或者止蝕，睇 5 分鐘檢查會唔會平倉。最後印 `SCORE` 表，每行 PASS 或 FAIL，同埋「x/7 passed」。喺臨時資料夾行，唔會掂到 data/ai-hl。加 `--no-claude` 就用固定指令代替 Claude，唔使錢，只試程式。
 
 **Hyperliquid API 自我測試**（bot 用到嘅每個 Hyperliquid API 有冇回應、格式啱唔啱、最新 K 線同資金費率夠唔夠新、ADA/BTC/ETH/SOL/HYPE/NEAR 價格合理唔合理、每個 call 幾多 ms）：
 
