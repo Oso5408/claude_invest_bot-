@@ -112,3 +112,26 @@ def test_trailing_mult_is_checked():
                                         max_hold_hours=0, strategy="s", reason="r", trailing_atr_mult=-1)
             return {"summary": "", "coins": []}
     assert st.run_scenario("quiet-market", Bad("quiet-market"), now=NOW)["orders"] == []
+
+
+@pytest.mark.parametrize("name,want", [("quiet-breakout-long", "long"), ("breakdown-short-fear", "short"),
+                                       ("fake-breakout-wick", "none"), ("breakout-low-volume", "none")])
+def test_code_flags_the_tested_4h_signal(name, want):
+    seen = {}
+
+    class Look(st.ScriptedBrain):
+        def run(self, context, handlers):
+            seen.update({c: v["4h_breakout_signal"] for c, v in context["market_overview"].items()})
+            return {"summary": "", "coins": []}
+    st.run_scenario(name, Look(name), now=NOW)
+    coin = st.SCENARIOS[name]["coin"]
+    assert seen[coin] == want
+    assert all(v == "none" for c, v in seen.items() if c != coin)
+
+
+def test_breakout_signal_rule():
+    base = {"close": 1.0, "donchian20_high": 0.99, "donchian10_low": 0.9, "volume_ratio20": 1.2}
+    assert ai.breakout_signal(base) == "long"
+    assert ai.breakout_signal({**base, "volume_ratio20": 1.1}) == "none"
+    assert ai.breakout_signal({**base, "donchian20_high": 1.1, "donchian10_low": 1.01}) == "short"
+    assert ai.breakout_signal({"error": "only 3 candles"}) == "none"
