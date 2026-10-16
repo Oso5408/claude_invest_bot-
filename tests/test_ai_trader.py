@@ -87,6 +87,19 @@ def test_limits_are_enforced_in_code(tmp_path):
     assert len(t.state["positions"]) == 2
 
 
+def test_wide_stop_shrinks_position_to_two_percent_risk(tmp_path):
+    # 20% stop on a 60 USD order would lose ~12.2 USD; 2% of 200 USD equity allows ~4 USD
+    brain = ScriptBrain([order(stop_price=0.8), order(stop_price=0.95)])
+    t = ai.AITrader(tmp_path, FakeMarket(), brain)
+    t.step(T0)
+    wide, normal = brain.results
+    assert "sized_down" in wide and "sized_down" not in normal
+    assert wide["loss_at_stop_usd"] == pytest.approx(0.02 * 200, rel=0.01)
+    pos = t.state["positions"][0]
+    assert pos["qty"] * pos["entry"] < 20 and pos["leverage"] == 3 and pos["margin"] < 7
+    assert normal["position_usd"] == pytest.approx(60.0)
+
+
 def test_decides_once_per_slot_and_new_day_resets(tmp_path):
     brain = ScriptBrain([order()])
     m = FakeMarket()

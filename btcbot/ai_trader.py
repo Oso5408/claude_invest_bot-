@@ -9,6 +9,8 @@ order, so no prompt or answer from Claude can get around them:
 - at most MAX_MARGIN_USD of margin per trade, at most MAX_POSITION_LEVERAGE on that margin
   (20 USD x 3 = 60 USD position; two of them on a 200 USD account is 0.6x, inside risk.MAX_LEVERAGE)
 - every trade needs a stop loss, no more than MAX_STOP_PCT from the entry (well before liquidation)
+- a trade may lose at most MAX_RISK_PCT of equity if its stop is hit (round-trip costs included): a bigger
+  order is shrunk to fit, so a wide stop means a small position
 - coins limited to COINS (Hyperliquid perps: ADA, BTC, ETH, SOL, HYPE, NEAR)
 
 Claude can also read a few trading guides (btcbot/skills/, copied from agiprolabs/claude-trading-skills
@@ -51,6 +53,7 @@ MAX_ENTRIES_PER_DAY: Final[int] = 2
 MAX_MARGIN_USD: Final[float] = 20.0
 MAX_POSITION_LEVERAGE: Final[float] = 3.0
 MAX_STOP_PCT: Final[float] = 0.25
+MAX_RISK_PCT: Final[float] = 0.02  # oso01 2026-10-17: lose at most 2% of equity per trade at the stop
 COINS: Final[tuple[str, ...]] = ("ADA", "BTC", "ETH", "SOL", "HYPE", "NEAR")
 SLIPPAGE = 0.0005
 INITIAL_USD = 200.0
@@ -116,6 +119,9 @@ Hard limits, enforced in code (an order outside them is rejected and you get the
 - at most {MAX_ENTRIES_PER_DAY} new trades per Japan day; the context says how many are left today
 - margin at most {MAX_MARGIN_USD:g} USD per trade, leverage at most {MAX_POSITION_LEVERAGE:g}x on that margin
 - every trade needs a stop loss within {MAX_STOP_PCT:.0%} of the entry price
+- a trade may lose at most {MAX_RISK_PCT:.0%} of equity if its stop is hit, costs included; a bigger order is \
+shrunk to fit (position = {MAX_RISK_PCT:.0%} of equity / (stop distance + about 0.2% costs)), so a wider stop \
+means a smaller position. Pick the stop where the idea is wrong, not to get a bigger size.
 - coins: {", ".join(COINS)}
 Costs: taker fee {TAKER_FEE:.3%} per side plus about {SLIPPAGE:.2%} slippage per side, hourly funding.
 
@@ -505,6 +511,13 @@ class AITrader:
             raise ValueError(f"take profit {take_profit_price} is on the wrong side of the entry {px:.6g}")
         notional = margin_usd * leverage
         eq = self.equity(self._mids or self.market.mids())
+        # loss if the stop is hit: stop distance plus fees and slippage on both sides
+        loss_per_usd = abs(px - stop_price) / px + 2 * (TAKER_FEE + SLIPPAGE)
+        max_notional = MAX_RISK_PCT * eq / loss_per_usd
+        asked = notional
+        if notional > max_notional:
+            notional = max_notional
+            margin_usd = notional / leverage
         used = sum(p["qty"] * p["entry"] for p in self.state["positions"])
         if used + notional > risk.MAX_LEVERAGE * eq:  # account-wide cap from risk.py still holds
             raise ValueError(f"account would exceed {risk.MAX_LEVERAGE:g}x of equity {eq:.2f}")
@@ -523,8 +536,13 @@ class AITrader:
         s["entries"] = {k: v for k, v in s["entries"].items() if k >= self._day()}
         s["entries"][self._day()] = s["entries"].get(self._day(), 0) + 1
         self._save()
-        return {"opened": pos["id"], "entry": round(px, 6), "qty": round(pos["qty"], 6), "fee_usd": round(fee, 4),
-                "trades_left_today": self.entries_left()}
+        out = {"opened": pos["id"], "entry": round(px, 6), "qty": round(pos["qty"], 6), "fee_usd": round(fee, 4),
+               "position_usd": round(notional, 2), "loss_at_stop_usd": round(notional * loss_per_usd, 2),
+               "trades_left_today": self.entries_left()}
+        if notional < asked:
+            out["sized_down"] = (f"asked {asked:.2f} USD, cut to {notional:.2f} USD so the stop loses at most "
+                                 f"{MAX_RISK_PCT:.0%} of equity {eq:.2f} USD")
+        return out
 
     def close_position(self, id: int, reason: str, px: float | None = None, when=None) -> dict:
         pos = next((p for p in self.state["positions"] if p["id"] == id), None)
