@@ -309,6 +309,14 @@ cd ~/claude_invest_bot- && . $HOME/.anthropic_env && .venv/bin/python -m btcbot.
 
 每個市況問 Claude 一次（全部大約 0.35 美元），有落單就將價格推到止賺或者止蝕，睇 5 分鐘檢查會唔會平倉。最後印 `SCORE` 表，每行 PASS 或 FAIL，同埋「x/7 passed」。喺臨時資料夾行，唔會掂到 data/ai-hl。加 `--no-claude` 就用固定指令代替 Claude，唔使錢，只試程式。
 
+**回顧有冇漏單**（過去幾日真實市況出過嘅 4h 突破／跌穿訊號同跟單大戶開倉，AI 有冇跟、佢當時點講、照回測方法做會賺幾多）：
+
+```bash
+cd ~/claude_invest_bot- && .venv/bin/python -m btcbot.ai_missed --days 7
+```
+
+只讀 data/ai-hl 同 Hyperliquid 公開 K 線，唔使 Claude、唔會寫任何檔案。
+
 **Hyperliquid API 自我測試**（bot 用到嘅每個 Hyperliquid API 有冇回應、格式啱唔啱、最新 K 線同資金費率夠唔夠新、ADA/BTC/ETH/SOL/HYPE/NEAR 價格合理唔合理、每個 call 幾多 ms）：
 
 ```bash
