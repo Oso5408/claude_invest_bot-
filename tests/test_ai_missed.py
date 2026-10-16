@@ -46,3 +46,14 @@ def test_trailing_result_follows_a_trend():
                        "close": close, "volume": 1.0}, index=idx)
     ret, state = am.trailing_result(df, 30, "long")
     assert state == "stopped" and ret > 0.1
+
+
+def test_copy_alert_under_24h_says_so(tmp_path):
+    market = st.ScenarioMarket(NOW, "quiet-market")
+    ai.AITrader(tmp_path, market, Quiet("x")).step(NOW.to_pydatetime())
+    t = NOW - pd.Timedelta(hours=3)
+    pd.DataFrame([{"time": str(t), "account": "0xa2e366c4", "coin": "ETH", "change": "opened short",
+                   "size_before": 0, "size_now": -10, "change_usd": 24000}]).to_csv(tmp_path / "copy_alerts.csv", index=False)
+    out = am.review(tmp_path, market, NOW + pd.Timedelta(minutes=5), days=2)
+    [r] = out["rows"]
+    assert r["taken"] == "NO" and r["tested_exit"].startswith("move so far")

@@ -142,14 +142,17 @@ def review(folder: Path, market, now: pd.Timestamp, days: float) -> dict:
             got = taken(ent, r.coin, side, r.time, pd.Timedelta(hours=1))
             m = market.candles(r.coin, "1h", r.time - pd.Timedelta(hours=2), min(now, r.time + pd.Timedelta(hours=26)))
             after = m[m.index >= r.time]
-            move = None
+            move, label = None, "24h move"
             if len(after) > 1:
                 d = 1 if side == "long" else -1
-                move = round(d * (float(after["close"].iloc[min(24, len(after) - 1)]) / float(after["open"].iloc[0]) - 1), 4)
+                k = min(23, len(after) - 1)
+                move = round(d * (float(after["close"].iloc[k]) / float(after["open"].iloc[0]) - 1), 4)
+                if k < 23:
+                    label = f"move so far, {k + 1}h"
             rows.append({"kind": f"copy {r.account}", "time": r.time, "coin": r.coin, "side": side,
                          "price": None, "fear_greed": None, "taken": got or "NO",
                          "trades_before_that_day": entries_that_day(ent, r.time),
-                         "tested_exit_return": move, "tested_exit": "24h move",
+                         "tested_exit_return": move, "tested_exit": label,
                          "ai_said": "" if got else coin_view(dec, r.coin, r.time, pd.Timedelta(hours=1))})
     rows.sort(key=lambda x: x["time"])
     missed = [r for r in rows if r["taken"] == "NO"]
