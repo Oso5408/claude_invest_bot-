@@ -126,7 +126,11 @@ Every time you are called, work through all of this before deciding:
 the entry timing) and its funding. The context has a short overview of each to start from, including \
 indicators already computed in code on 4h, 1h and 15m (EMA 20/50/200, RSI 14, ATR 14, Bollinger Bands, \
 Donchian channels, volume ratio); use these numbers rather than estimating indicators from raw candles, \
-and get_indicators for other timeframes. Remember that \
+and get_indicators for other timeframes. 4h_breakout_signal is the tested 4h breakout rule already checked \
+in code on the last completed 4h candle: "long" (closed above the 20-bar high, volume at least 1.2x), \
+"short" (closed below the 10-bar low; the short side uses the 10-bar low, not the 20-bar low; the tested \
+short also needs Fear & Greed at or below 50) or "none". \
+That candle has already closed, so there is no close left to wait for. Remember that \
 a round trip costs about 0.2%, so a 15m setup with a tight stop starts far behind; use 15m mainly to time \
 entries for ideas that also make sense on 1h and 4h.
 2. Several strategy types for each coin, for example trend following / breakout, range or mean reversion, \
@@ -142,13 +146,16 @@ they seem to be doing and whether it is worth following; they can be hedging or 
 days, mostly buy strength with the 7-day trend and add to winners, and use limit orders. A backtest of \
 copying their trades in our coins an hour late, with our costs, made about +1.6% per trade over the two \
 months before they were picked (82 trades, win rate about 49%, so a few big winners carry it; most of it \
-from 0x405e and 0xb69e). Their profit in other coins can't be copied. When copy_traders.alerts_now is not \
+from 0x405e and 0xb69e, but all five were picked and the backtest copied every one of their trades with \
+no chart filter, so each of the five counts as tested). Their profit in other coins can't be copied. When copy_traders.alerts_now is not \
 empty you were called because one of them just opened, closed or flipped a position: decide whether to \
 follow (same side, name the strategy "copy 0x..." with the first 6 characters of the address) or not, and \
 say why. They use no stop that we can see, but you must: set it wide enough for a multi-day swing (for \
 example 2 to 3 ATR on 4h) and consider a trailing stop. When one of them closes a position you copied, \
-consider closing yours. Copying is not required; skip a trade that looks bad on the chart or would use \
-the last trade of the day on a weak idea.
+consider closing yours. Copying is not required, but following is the tested default: a flat or unclear chart is \
+not a reason to skip, since the backtest did not wait for confirmation. Skip only with a concrete reason, \
+for example the chart clearly against the trade (a strong opposite trend or a breakdown), funding far \
+against it, or it would use the last trade of the day while a tested breakout signal is also live.
 Then open a trade only where you see a real edge after costs; doing nothing is fine when nothing stands \
 out. Name the strategy and give your reason on every order; your owner reads them in the daily report.
 
@@ -273,6 +280,18 @@ def indicators(df: pd.DataFrame) -> dict:
     out["trend"] = ("up" if px > out["ema20"] > out["ema50"] else
                     "down" if px < out["ema20"] < out["ema50"] else "mixed")
     return out
+
+
+def breakout_signal(ind: dict) -> str:
+    """The tested 4h breakout rule on the last completed 4h candle: "long" when it closed above the 20-bar
+    high on at least 1.2x volume, "short" when it closed below the 10-bar low, else "none"."""
+    if "close" not in ind:
+        return "none"
+    if ind["donchian20_high"] is not None and ind["close"] > ind["donchian20_high"] and (ind["volume_ratio20"] or 0) >= 1.2:
+        return "long"
+    if ind["donchian10_low"] is not None and ind["close"] < ind["donchian10_low"]:
+        return "short"
+    return "none"
 
 
 def completed(df: pd.DataFrame, interval: str, now: pd.Timestamp) -> pd.DataFrame:
@@ -671,6 +690,7 @@ class AITrader:
                              "funding_last": float(f.iloc[-1]) if len(f) else None,
                              "funding_24h_sum": round(float(f.sum()), 6) if len(f) else None,
                              "indicators": {iv: indicators(completed(df, iv, now)) for iv, df in frames.items()}}
+                out[coin]["4h_breakout_signal"] = breakout_signal(out[coin]["indicators"]["4h"])
             except Exception as e:
                 out[coin] = f"unavailable: {e}"
         return out
