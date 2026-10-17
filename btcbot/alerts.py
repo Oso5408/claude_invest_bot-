@@ -24,8 +24,9 @@ def configured() -> bool:
     return bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"))
 
 
-def send(text: str) -> bool:
-    """Send one message. Returns False (and prints the text) when Telegram is not set up or fails."""
+def send(text: str, silent: bool = False) -> bool:
+    """Send one message (silent = no sound on the phone). Returns False (and prints the text) when Telegram
+    is not set up or fails."""
     print(text, flush=True)
     if not configured():
         print("[alert not sent: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set]", flush=True)
@@ -35,7 +36,8 @@ def send(text: str) -> bool:
     try:
         resp = requests.post(API.format(token=os.environ["TELEGRAM_BOT_TOKEN"], method="sendMessage"),
                              json={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text,
-                                   "disable_web_page_preview": True}, timeout=15)
+                                   "disable_web_page_preview": True, "disable_notification": silent},
+                             timeout=15)
         ok = resp.ok and resp.json().get("ok", False)
         if not ok:
             print(f"[alert failed: HTTP {resp.status_code} {resp.text[:200]}]", flush=True)
