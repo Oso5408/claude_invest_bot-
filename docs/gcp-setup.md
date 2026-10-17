@@ -382,7 +382,29 @@ sudo systemctl restart telegram-bot             # git pull 之後要重啟先用
 sudo systemctl disable --now telegram-bot       # 完全停用
 ```
 
-## 14. 停止
+## 14. 每日模擬帳戶：純多頭動量（2026-10-17 起）
+
+規則見 `docs/prereg-long-only-momentum.md`，回測見 PR #40。每日 UTC 00:10（日本時間 09:10）行一次，唔使 Claude 錢，兩個帳戶各 200 USD：
+
+- `data/daily-xs-long3`：HL 成交量前 20 大幣入面，28 日升幅最強嘅 3 隻，只做多，1x，每兩個星期一換倉；BTC 前一日收市低過 50 日平均就全部轉現金。
+- `data/daily-btc-sma50`：對照組，同一個 BTC 開關，開就 1x 揸 BTC，關就現金。
+
+成交價用當日日線開市價，再扣 taker 0.045% 同滑價，資金費用 HL 真實每小時資金費。每次大約要 3 分鐘（要下載所有幣嘅日線）。
+
+**1. 更新程式：** `cd ~/claude_invest_bot- && git pull`
+
+**2. 喺 crontab 加兩行**（第二行係補行，第一次成功咗佢就乜都唔做）：
+
+```
+10 0 * * * . $HOME/.telegram_env; cd $HOME/claude_invest_bot- && .venv/bin/python -m btcbot.xs_paper run >> data/daily-xs-long3.log 2>&1
+40 0 * * * . $HOME/.telegram_env; cd $HOME/claude_invest_bot- && .venv/bin/python -m btcbot.xs_paper run >> data/daily-xs-long3.log 2>&1
+```
+
+**3. 睇結果：** `.venv/bin/python -m btcbot.xs_paper status`；每日監察報告亦會列出兩個帳戶。超過 26 個鐘冇行，Watchdog 會通知你。漏咗嘅日子唔會補做。
+
+**暫停 AI 帳戶（第 12 節）：** `crontab -e`，喺 `ai_trader step` 同 `ai_trader report` 嗰兩行前面加 `#`。`data/ai-hl` 嘅紀錄全部保留，想重開就刪返個 `#`。大戶掃描（`hl_traders`）唔使 Claude 錢，可以照留或者一齊停。
+
+## 15. 停止
 
 - **暫停：** 打 `crontab -e`，喺嗰兩行前面加 `#`。
 - **完全唔用：** 喺 VM instances 撳 **Stop** 或者 **Delete**。停咗機就唔會再收機器嘅錢，但係硬碟仍然會收少少錢，delete 咗就全部唔收。

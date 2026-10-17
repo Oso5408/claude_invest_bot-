@@ -5,6 +5,8 @@
     python -m btcbot.monitor report    # once a day: summary of the last 24h, also sent to Telegram
 
 Accounts are found as data/paper-*/state.json; put a file called NO_MONITOR in a folder to skip it.
+Once-a-day accounts (btcbot/xs_paper.py) are found as data/daily-*/state.json: watch only checks that they ran in
+the last DAILY_OFFLINE_HOURS and that their log has no errors, and the daily report lists their equity.
 The cron log of account data/paper-x is expected at data/paper-x.log (as in docs/gcp-setup.md).
 Alerts go to Telegram (btcbot/alerts.py). Each problem is sent once when it starts, repeated every
 few hours while it lasts, and once more when it clears. Monitor state lives in data/monitor/.
@@ -36,11 +38,16 @@ GRACE = pd.Timedelta(minutes=20)  # give the trader time to process a closed can
 OK_RESULTS = {"entered", "in_position", "no_signal"}
 SKIP_RESULTS = {"skipped_size", "claude_skip"}  # sizing or Claude decided against it: reported, not an alert
 ERROR_WORDS = ("Traceback", "Error", "Exception")
+DAILY_OFFLINE_HOURS = 26
 
 
 # ---------- helpers ----------
 def account_folders(data_dir: Path) -> list[Path]:
     return sorted(p.parent for p in data_dir.glob("paper*/state.json") if not (p.parent / "NO_MONITOR").exists())
+
+
+def daily_folders(data_dir: Path) -> list[Path]:
+    return sorted(p.parent for p in data_dir.glob("daily-*/state.json") if not (p.parent / "NO_MONITOR").exists())
 
 
 def read_csv(path: Path) -> pd.DataFrame:
@@ -117,6 +124,13 @@ def watch_folder(folder: Path, state: MonitorState, now: datetime) -> dict[str, 
         if lev > cap * 1.05:
             problems[f"watch:{name}:leverage"] = f"[{name}] 槓桿 {lev:.2f}x 超過上限 {cap:g}x（倉位 {st['qty']:+g} @ {price:g}）。"
 
+    problems.update(log_errors(folder, state))
+    return problems
+
+
+def log_errors(folder: Path, state: MonitorState) -> dict[str, str]:
+    name = folder.name
+    problems: dict[str, str] = {}
     log = folder.parent / f"{name}.log"
     if log.exists():
         offsets = state.data["log_offsets"]
@@ -135,6 +149,21 @@ def watch_folder(folder: Path, state: MonitorState, now: datetime) -> dict[str, 
     return problems
 
 
+def watch_daily(folder: Path, state: MonitorState, now: datetime) -> dict[str, str]:
+    name = folder.name
+    try:
+        st = json.loads((folder / "state.json").read_text())
+    except Exception as e:
+        return {f"watch:{name}:state": f"[{name}] state.json 讀唔到：{e}。"}
+    problems = log_errors(folder, state)
+    last = pd.Timestamp(st["last_run"]) if st.get("last_run") else None
+    if last is None or pd.Timestamp(now) - last > pd.Timedelta(hours=DAILY_OFFLINE_HOURS):
+        ago = "從未行過" if last is None else f"上次 {last.tz_convert('Asia/Tokyo'):%m-%d %H:%M} JST"
+        problems[f"watch:{name}:offline"] = (f"[{name}] 每日模擬盤超過 {DAILY_OFFLINE_HOURS} 個鐘冇行（{ago}）。"
+                                              f"檢查 crontab 同 {name}.log。")
+    return problems
+
+
 def watch(data_dir: Path, now: datetime | None = None, send=alerts.send) -> list[str]:
     now = now or datetime.now(timezone.utc)
     state = MonitorState(data_dir / "monitor" / "state.json")
@@ -144,6 +173,8 @@ def watch(data_dir: Path, now: datetime | None = None, send=alerts.send) -> list
         problems["watch:none"] = f"搵唔到任何模擬帳戶（{data_dir}/paper*/state.json）。"
     for folder in folders:
         problems.update(watch_folder(folder, state, now))
+    for folder in daily_folders(data_dir):
+        problems.update(watch_daily(folder, state, now))
     msgs = raise_problems(state, problems, now, "watch:")
     state.data["last_watch"] = now.isoformat()
     state.save()
@@ -324,6 +355,20 @@ def report(data_dir: Path, now: datetime | None = None, send=alerts.send, **chec
         else:
             line += "，未有可檢查嘅 K 線（signals.csv 未有紀錄）"
         lines.append(line)
+    for folder in daily_folders(data_dir):
+        eq = read_csv(folder / "equity.csv")
+        if eq.empty:
+            lines.append(f"[{folder.name}] 每日模擬盤未行過")
+            continue
+        eq["time"] = pd.to_datetime(eq["time"], utc=True, format="ISO8601")
+        end = float(eq["equity"].iloc[-1])
+        prev = eq[eq["time"] <= day_ago]
+        start = float(prev["equity"].iloc[-1]) if len(prev) else end
+        pos = str(eq["positions"].iloc[-1]) if pd.notna(eq["positions"].iloc[-1]) else ""
+        held = " ".join(x.split(":")[0] for x in pos.split()) or "現金"
+        lines.append(f"[{folder.name}] 每日一次，資金 {start:,.2f} → {end:,.2f}（{end / start - 1:+.1%}，"
+                     f"開始至今 {end / 200 - 1:+.1%}），BTC 開關{'開' if int(eq['btc_switch'].iloc[-1]) else '關'}，"
+                     f"持倉 {held}")
     active = [v["text"] for k, v in state.data["active"].items()]
     lines += ["", "未解決問題：" + ("冇" if not active else "")] + [f"- {t}" for t in active]
     text = "\n".join(lines)
