@@ -312,6 +312,9 @@ def main(argv: list[str] | None = None) -> None:
     end = end or str(p.dates[-1].date())
     btc = pd.Series(p.c[:, p.coins.index("BTC")], index=p.dates).pct_change() if "BTC" in p.coins else None
     print(f"{len(p.coins)} coins, {len(funding)} with funding, {start} .. {end}\n")
+    if pd.Timestamp(start) > pd.Timestamp(end):
+        print("No data after the start date yet; download fresh data first.")
+        return
     if a.long_only:
         runs = {LONG_ONLY.name: simulate(p, LONG_ONLY, start, end),
                 "same, 0.15% slippage": simulate(p, replace(LONG_ONLY, slip=0.0015), start, end),
