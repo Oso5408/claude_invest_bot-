@@ -48,17 +48,57 @@ def test_random_walk_hit_rate_near_72pct():
     assert 0.62 < np.mean(hits) < 0.82
 
 
+class _Resp:
+    def __init__(self, body):
+        self.body = body
+
+    def json(self):
+        return self.body
+
+
+def _polymarket(closed_up: dict):
+    """Fake requests.get for Gamma + CLOB. closed_up maps window unix ts -> settled Up price."""
+    def get(url, params=None, timeout=None):
+        if url == updown.GAMMA:
+            ts = int(params["slug"].rsplit("-", 1)[1])
+            up = closed_up.get(ts)
+            return _Resp([{"clobTokenIds": '["111", "222"]', "closed": up is not None,
+                           "outcomePrices": f'["{up if up is not None else 0.6}", "0.4"]'}])
+        if url.endswith("/midpoint"):
+            assert params["token_id"] == "111"
+            return _Resp({"mid": "0.64"})
+        return _Resp({"bids": [{"price": "0.60", "size": "5"}, {"price": "0.63", "size": "9"}],
+                      "asks": [{"price": "0.70", "size": "5"}, {"price": "0.65", "size": "9"}]})
+    return get
+
+
+def test_polymarket_quote_and_result():
+    w = pd.Timestamp("2026-10-17 15:05", tz="UTC")
+    assert updown.pm_slug(w) == "btc-updown-5m-1792249500"  # format seen on the VM
+    get = _polymarket({1792249500: 1})
+    assert updown.pm_quote(w, get) == {"pm_up_mid": 0.64, "pm_up_bid": 0.63, "pm_up_ask": 0.65}
+    assert updown.pm_result(w, get) == "UP"
+    assert updown.pm_result(w + pd.Timedelta(minutes=5), get) is None  # not settled yet
+
+    def broken(url, params=None, timeout=None):
+        raise ConnectionError("blocked")
+    assert updown.pm_quote(w, broken) == {} and updown.pm_result(w, broken) is None
+
+
 def test_step_sends_scores_and_summarises(tmp_path):
     sent = []
     t0 = datetime(2026, 10, 17, 9, 2, 3, tzinfo=timezone.utc)
     full = _minutes(t0 + timedelta(minutes=5), n=70)
     fetch = lambda now: full.loc[:pd.Timestamp(now).floor("1min")]  # noqa: E731
     send = lambda text, silent=False: sent.append((text, silent))  # noqa: E731
-    first = updown.step(tmp_path, t0, fetch, send)
+    w0 = int(pd.Timestamp("2026-10-17 09:00", tz="UTC").timestamp())
+    get = _polymarket({w0: 0})
+    first = updown.step(tmp_path, t0, fetch, send, get)
     assert first["window"].startswith("2026-10-17T09:00") and sent[0][1] is True
     assert "BTC 18:00-18:05" in sent[0][0]  # shown in JST
-    assert updown.step(tmp_path, t0 + timedelta(seconds=20), fetch, send) is None  # same candle: no repeat
-    updown.step(tmp_path, t0 + timedelta(minutes=5), fetch, send)
+    assert first["pm_up_mid"] == 0.64 and "Polymarket Up 價 0.64" in sent[0][0]
+    assert updown.step(tmp_path, t0 + timedelta(seconds=20), fetch, send, get) is None  # same candle: no repeat
+    updown.step(tmp_path, t0 + timedelta(minutes=5), fetch, send, get)
     df = updown.load(tmp_path)
     assert len(df) == 2 and df["result"].notna().sum() == 1
     w = pd.Timestamp("2026-10-17 09:00", tz="UTC")
@@ -67,6 +107,7 @@ def test_step_sends_scores_and_summarises(tmp_path):
     out = tb.answer("/predict", tmp_path, t0 + timedelta(minutes=6))
     assert "1/1" in out or "0/1" in out
     assert "跟頭 2 分鐘" in out
+    assert df.loc[0, "pm_result"] == "DOWN" and "Polymarket 對比（1 支" in out
 
 
 def test_summary_without_data(tmp_path):

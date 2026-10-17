@@ -409,13 +409,15 @@ sudo systemctl disable --now telegram-bot       # 完全停用
 
 每支 BTC 5 分鐘 K 線開咗 2 分鐘（日本時間 :02、:07、:12…），用 Watchdog bot 靜音發一個 UP 或 DOWN，即係估呢支收市會高過定低過開市價，連埋機會率。數據用 Hyperliquid BTC 1 分鐘 K 線，唔用 Claude，唔落單。每次預測記錄喺 `data/updown/predictions.csv`，收市後自動對答案。
 
+同一時間亦會讀 Polymarket「Bitcoin Up or Down」5 分鐘盤嘅公開 Up 價（只係讀，唔會落注），收市後再記低 Polymarket 自己嘅結算結果，`/predict` 會比較我哋同盤口邊個估得準（命中率同 Brier 分數）。Polymarket 用 Chainlink 價結算，同 Hyperliquid 價會有少少差。
+
 點樣睇個命中率：第 2 分鐘嗰陣跟住頭 2 分鐘嘅方向估，就算價格完全隨機都有約 72% 中（數學效果，唔係預測能力）。所以每個結果都同呢條基準一齊列出，要長期贏過佢先算有用。
 
 **1. 更新程式，試一次：**
 
 ```bash
 cd ~/claude_invest_bot- && git pull
-.venv/bin/python -m btcbot.updown once
+.venv/bin/python -m btcbot.updown once     # 應該見到 p_up、call，同埋 pm_up_mid（Polymarket Up 價）
 ```
 
 **2. 設定成 systemd 服務：**

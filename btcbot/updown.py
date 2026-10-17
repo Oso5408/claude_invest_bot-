@@ -11,6 +11,11 @@ How the call is made (checked on Binance BTC 5m, 2023-01..2026-10, ~400k candles
   (slope -0.026 overall, -0.005 in 2026), so this almost never changes the call.
 So the honest bar is not 50% but the "follow the first 2 minutes" baseline, logged next to every call.
 
+Polymarket (read only, never trades): at the same moment it reads the public price of "Up" in Polymarket's
+"Bitcoin Up or Down" 5-minute market (slug btc-updown-5m-<window start, unix s>), and later that market's
+own result. Polymarket settles on a Chainlink BTC/USD TWAP, not Hyperliquid, so its result can differ from ours
+on tiny moves. A failed Polymarket read only leaves those columns empty.
+
     python -m btcbot.updown run        # loop forever (systemd service updown-bot)
     python -m btcbot.updown once       # make one call now and print it (sends nothing)
     python -m btcbot.updown status     # hit rates: today, 7 days, all, vs baseline
@@ -19,12 +24,14 @@ So the honest bar is not 50% but the "follow the first 2 minutes" baseline, logg
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
+import requests
 
 from btcbot import alerts, hyperliquid
 
@@ -34,8 +41,10 @@ CALL_AT = timedelta(minutes=2, seconds=3)  # a few seconds after minute 2 so the
 REVERSAL = -0.026
 VOL_MINUTES = 30
 JST = timezone(timedelta(hours=9))
+GAMMA = "https://gamma-api.polymarket.com/markets"
+CLOB = "https://clob.polymarket.com"
 COLUMNS = ["window", "sent", "open", "price", "move_pct", "prev_pct", "p_up", "call", "baseline",
-           "close", "result", "correct", "baseline_correct"]
+           "close", "result", "correct", "baseline_correct", "pm_up_mid", "pm_up_bid", "pm_up_ask", "pm_result"]
 
 
 def folder(data: Path) -> Path:
@@ -80,11 +89,69 @@ def predict(m: pd.DataFrame, window: datetime) -> dict:
             "call": "UP" if p_up >= 0.5 else "DOWN", "baseline": baseline}
 
 
+def pm_slug(window) -> str:
+    return f"btc-updown-5m-{int(pd.Timestamp(window).timestamp())}"
+
+
+def pm_market(window, get=requests.get) -> dict | None:
+    rows = get(GAMMA, params={"slug": pm_slug(window)}, timeout=10).json()
+    return rows[0] if rows else None
+
+
+def pm_quote(window, get=requests.get) -> dict:
+    """Polymarket's price of "Up" right now: CLOB midpoint and best bid/ask. {} when unavailable."""
+    try:
+        mk = pm_market(window, get)
+        if not mk:
+            return {}
+        up_token = json.loads(mk["clobTokenIds"])[0]
+        out = {}
+        try:
+            out["pm_up_mid"] = float(get(f"{CLOB}/midpoint", params={"token_id": up_token}, timeout=10).json()["mid"])
+            book = get(f"{CLOB}/book", params={"token_id": up_token}, timeout=10).json()
+            if book.get("bids"):
+                out["pm_up_bid"] = max(float(b["price"]) for b in book["bids"])
+            if book.get("asks"):
+                out["pm_up_ask"] = min(float(a["price"]) for a in book["asks"])
+        except Exception:
+            out.setdefault("pm_up_mid", float(json.loads(mk["outcomePrices"])[0]))  # Gamma's few-seconds-old price
+        return out
+    except Exception as e:
+        print(f"[polymarket quote failed: {type(e).__name__}: {e}]", flush=True)
+        return {}
+
+
+def pm_result(window, get=requests.get) -> str | None:
+    """'UP' / 'DOWN' once Polymarket has settled the market, else None."""
+    try:
+        mk = pm_market(window, get)
+        if not mk or not mk.get("closed"):
+            return None
+        up = float(json.loads(mk["outcomePrices"])[0])
+        return "UP" if up >= 0.99 else "DOWN" if up <= 0.01 else None
+    except Exception:
+        return None
+
+
+def pm_settle(df: pd.DataFrame, now: datetime, get=requests.get, limit: int = 3) -> pd.DataFrame:
+    """Fill pm_result for up to `limit` recent calls whose candle ended at least a minute ago."""
+    df = df.copy()
+    t = pd.to_datetime(df["window"], utc=True)
+    todo = df.index[df["pm_result"].isna() & (t + WINDOW + timedelta(minutes=1) <= now) & (t >= now - timedelta(hours=6))]
+    for i in list(todo)[-limit:]:
+        df.at[i, "pm_result"] = pm_result(df.at[i, "window"], get)
+    return df
+
+
 def load(data: Path) -> pd.DataFrame:
     path = folder(data) / "predictions.csv"
     if not path.exists():
         return pd.DataFrame(columns=COLUMNS)
-    return pd.read_csv(path, dtype={"result": object, "call": object, "baseline": object})
+    df = pd.read_csv(path, dtype={"result": object, "call": object, "baseline": object, "pm_result": object})
+    for c in COLUMNS:
+        if c not in df:
+            df[c] = None
+    return df
 
 
 def save(data: Path, df: pd.DataFrame) -> None:
@@ -117,6 +184,20 @@ def hit_line(df: pd.DataFrame, label: str) -> str:
     return f"{label}：{k}/{n} = {k / n:.1%}（跟頭 2 分鐘 {b / n:.1%}）"
 
 
+def pm_line(df: pd.DataFrame) -> str:
+    """Our probability vs Polymarket's minute-2 price, on candles Polymarket has settled (lower Brier = better)."""
+    done = df[df["pm_result"].isin(["UP", "DOWN"]) & df["pm_up_mid"].notna()]
+    if done.empty:
+        return "Polymarket 對比：未有結果"
+    y = (done["pm_result"] == "UP").astype(float)
+    mid, ours = done["pm_up_mid"].astype(float), done["p_up"].astype(float)
+    hit_pm = ((mid >= 0.5) == (y == 1)).mean()
+    hit_ours = ((ours >= 0.5) == (y == 1)).mean()
+    brier_pm, brier_ours = ((mid - y) ** 2).mean(), ((ours - y) ** 2).mean()
+    return (f"Polymarket 對比（{len(done)} 支，用佢結算結果）：我哋中 {hit_ours:.1%} vs 盤口 {hit_pm:.1%}；"
+            f"Brier 我哋 {brier_ours:.3f} vs 盤口 {brier_pm:.3f}（細啲好啲）")
+
+
 def summary(data: Path, now: datetime | None = None) -> str:
     now = now or datetime.now(timezone.utc)
     df = load(data)
@@ -128,6 +209,7 @@ def summary(data: Path, now: datetime | None = None) -> str:
              hit_line(df[t.dt.tz_convert(JST).dt.date == today], "今日（日本時間）"),
              hit_line(df[t >= now - timedelta(days=7)], "7 日"),
              hit_line(df, "全部"),
+             pm_line(df),
              f"最後一次：{t.max().tz_convert(JST):%m-%d %H:%M} JST",
              "隨機估係 50%；第 2 分鐘跟住已行方向估都有約 72%，要贏過後者先算有預測能力。"]
     return "\n".join(lines)
@@ -139,6 +221,8 @@ def message(row: dict, df: pd.DataFrame, now: datetime) -> str:
     p = row["p_up"] if row["call"] == "UP" else 1 - row["p_up"]
     lines = [f"BTC {w:%H:%M}-{w + pd.Timedelta(minutes=5):%H:%M}：{arrow}（{p:.0%}）",
              f"開 {row['open']:,.0f} → 而家 {row['price']:,.0f}（{row['move_pct']:+.3f}%），上一支 {row['prev_pct']:+.3f}%"]
+    if row.get("pm_up_mid") is not None:
+        lines.append(f"Polymarket Up 價 {row['pm_up_mid']:.2f}（只係記錄，唔落注）")
     done = df[df["result"].notna()]
     if not done.empty:
         last = done.iloc[-1]
@@ -149,7 +233,7 @@ def message(row: dict, df: pd.DataFrame, now: datetime) -> str:
     return "\n".join(lines)
 
 
-def step(data: Path, now: datetime, fetch=fetch_minutes, send=alerts.send) -> dict | None:
+def step(data: Path, now: datetime, fetch=fetch_minutes, send=alerts.send, get=requests.get) -> dict | None:
     """Score finished calls, then make and send the call for the current candle. Returns the new row."""
     m = fetch(now)
     df = score(load(data), m)
@@ -158,8 +242,10 @@ def step(data: Path, now: datetime, fetch=fetch_minutes, send=alerts.send) -> di
         save(data, df)
         return None
     row = predict(m, w)
+    row.update(pm_quote(w, get))  # read first: the price at minute 2 is what we compare against
     row["sent"] = now.isoformat(timespec="seconds")
     df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    df = pm_settle(df, now, get)
     save(data, df)
     send(message(row, df, now), silent=True)
     return row
@@ -192,7 +278,9 @@ def main(argv: list[str] | None = None) -> None:
         w = window_start(now)
         if now - w < timedelta(minutes=2):
             w -= WINDOW  # minute 2 not reached yet: show the previous candle's call
-        print(predict(fetch_minutes(now), w))
+        row = predict(fetch_minutes(now), w)
+        row.update(pm_quote(w))
+        print(row)
     else:
         run(data)
 
