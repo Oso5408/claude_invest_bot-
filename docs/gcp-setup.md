@@ -339,6 +339,7 @@ cd ~/claude_invest_bot- && .venv/bin/python -m btcbot.hl_selftest
 | `/ai` | AI 帳戶最新決定同 Claude 費用 |
 | `/vm` | VM 開機時間、負載、記憶體、硬碟、程式版本 |
 | `/report` | 即刻出一份每日監察報告（要一兩分鐘） |
+| `/predict` | BTC 5 分鐘升跌預測命中率（第 15 節） |
 | `/help` | 指令清單 |
 
 **1. 更新程式，喺 VM 試行：**
@@ -404,7 +405,46 @@ sudo systemctl disable --now telegram-bot       # 完全停用
 
 **暫停 AI 帳戶（第 12 節）：** `crontab -e`，喺 `ai_trader step` 同 `ai_trader report` 嗰兩行前面加 `#`。`data/ai-hl` 嘅紀錄全部保留，想重開就刪返個 `#`。大戶掃描（`hl_traders`）唔使 Claude 錢，可以照留或者一齊停。
 
-## 15. 停止
+## 15. BTC 5 分鐘升跌預測（只係通知，唔落單）
+
+每支 BTC 5 分鐘 K 線開咗 2 分鐘（日本時間 :02、:07、:12…），用 Watchdog bot 靜音發一個 UP 或 DOWN，即係估呢支收市會高過定低過開市價，連埋機會率。數據用 Hyperliquid BTC 1 分鐘 K 線，唔用 Claude，唔落單。每次預測記錄喺 `data/updown/predictions.csv`，收市後自動對答案。
+
+點樣睇個命中率：第 2 分鐘嗰陣跟住頭 2 分鐘嘅方向估，就算價格完全隨機都有約 72% 中（數學效果，唔係預測能力）。所以每個結果都同呢條基準一齊列出，要長期贏過佢先算有用。
+
+**1. 更新程式，試一次：**
+
+```bash
+cd ~/claude_invest_bot- && git pull
+.venv/bin/python -m btcbot.updown once
+```
+
+**2. 設定成 systemd 服務：**
+
+```bash
+sudo tee /etc/systemd/system/updown-bot.service > /dev/null <<EOT
+[Unit]
+Description=BTC 5-minute up/down calls on Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=$USER
+WorkingDirectory=$HOME/claude_invest_bot-
+ExecStart=/bin/bash -c '. $HOME/.telegram_env && exec .venv/bin/python -m btcbot.updown run'
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOT
+sudo systemctl daemon-reload
+sudo systemctl enable --now updown-bot
+sudo systemctl restart telegram-bot   # 等 /predict 指令生效
+```
+
+**3. 睇結果：** Telegram 打 `/predict`，或者 `.venv/bin/python -m btcbot.updown status`。停用：`sudo systemctl disable --now updown-bot`。
+
+## 16. 停止
 
 - **暫停：** 打 `crontab -e`，喺嗰兩行前面加 `#`。
 - **完全唔用：** 喺 VM instances 撳 **Stop** 或者 **Delete**。停咗機就唔會再收機器嘅錢，但係硬碟仍然會收少少錢，delete 咗就全部唔收。

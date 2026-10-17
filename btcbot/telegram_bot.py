@@ -25,7 +25,7 @@ from pathlib import Path
 import pandas as pd
 import requests
 
-from btcbot import alerts, monitor
+from btcbot import alerts, monitor, updown
 from btcbot.paper import paused
 
 JST = timezone(timedelta(hours=9))
@@ -41,6 +41,7 @@ COMMANDS = {
     "ai": "AI 帳戶最新決定",
     "vm": "VM 開機時間、CPU、記憶體、硬碟、程式版本",
     "report": "即刻出一份每日監察報告",
+    "predict": "BTC 5 分鐘升跌預測命中率",
     "help": "指令清單",
 }
 
@@ -281,12 +282,16 @@ def cmd_report(data: Path, now: datetime, arg: str = "") -> str:
     return f"報告已經發出，亦儲存喺 {path}"
 
 
+def cmd_predict(data: Path, now: datetime, arg: str = "") -> str:
+    return updown.summary(data, now)
+
+
 def cmd_help(data: Path, now: datetime, arg: str = "") -> str:
     return "指令（只係睇，唔會改任何嘢）：\n" + "\n".join(f"/{k} - {v}" for k, v in COMMANDS.items())
 
 
 HANDLERS = {"balance": cmd_balance, "positions": cmd_positions, "trades": cmd_trades, "signals": cmd_signals,
-            "health": cmd_health, "ai": cmd_ai, "vm": cmd_vm, "report": cmd_report, "help": cmd_help,
+            "health": cmd_health, "ai": cmd_ai, "vm": cmd_vm, "report": cmd_report, "predict": cmd_predict, "help": cmd_help,
             "start": cmd_help}
 
 
