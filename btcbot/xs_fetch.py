@@ -1,7 +1,8 @@
 """Download Hyperliquid data for the cross-sectional momentum test. Standard library only.
 
-Run on a machine that can reach Hyperliquid:   python xs_fetch.py
-Writes into a folder "hl_data/xs" next to this script (re-running skips files already done):
+Run on a machine that can reach Hyperliquid:   python xs_fetch.py [folder]
+Writes into [folder] (default "hl_data/xs" next to this script); re-running skips files already done, so give a
+new folder (e.g. hl_data/xs-2027-01) to get fresh data:
   meta.json                 every perp in HL meta, including delisted ones
   D_<COIN>.csv              daily candles (full history, API keeps 5000 per interval)
   F_<COIN>.csv              hourly funding, full history, for coins ever in the top 25 by volume
@@ -85,6 +86,8 @@ def ever_top(coins):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        OUT = os.path.abspath(sys.argv[1])
     os.makedirs(OUT, exist_ok=True)
     meta = post({"type": "meta"})
     with open(os.path.join(OUT, "meta.json"), "w") as f:

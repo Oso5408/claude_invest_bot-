@@ -294,13 +294,17 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--data", required=True, help="folder written by xs_fetch.py")
     ap.add_argument("--holdout", action="store_true", help="evaluate the hold-out period (only after the dev gates)")
+    ap.add_argument("--start", help="forward test: only days from this date (after the hold-out was used up), "
+                                     "e.g. 2026-10-17; implies the full data set")
     ap.add_argument("--perm", type=int, default=0, help="shuffled-pick runs for the main variant")
     ap.add_argument("--long-only", action="store_true",
                     help="docs/prereg-long-only-momentum.md: long-only top 3 with the BTC switch, vs BTC benchmarks")
     ap.add_argument("--json", help="write all numbers here")
     a = ap.parse_args(argv)
     daily, funding = load(a.data)
-    if a.holdout:
+    if a.start:
+        start, end, panel_end = a.start, None, None
+    elif a.holdout:
         start, end, panel_end = HOLDOUT_START, None, None
     else:
         start, end, panel_end = DEV_START, DEV_END, DEV_END
