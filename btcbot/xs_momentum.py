@@ -42,9 +42,13 @@ class Variant:
     signal: str = "momentum"      # or "funding"
     lookback: int = 7
     k: int = 2
-    rebalance: str = "weekly"     # Mondays, or "daily"
+    rebalance: str = "weekly"     # Mondays, "biweekly" (every other Monday from 2023-01-02) or "daily"
     weights: str = "inv_vol"      # or "equal"
     slip: float | None = None     # one slippage for every coin (stress test); None = LOW_SLIP / SLIP
+    long_only: bool = False       # long the top K only, `side_gross` x equity in total
+    side_gross: float = MAX_GROSS / 2
+    regime: bool = False          # hold only while BTC's previous close > its 50-day average, else cash
+    stop: bool = True             # per-leg 3-sigma stop
 
 
 VARIANTS = [
@@ -55,6 +59,11 @@ VARIANTS = [
     Variant("5 equal notional", weights="equal"),
     Variant("6 funding factor", signal="funding"),
 ]
+
+# docs/prereg-long-only-momentum.md (oso01's method A, 2026-10-17)
+LONG_ONLY = Variant("long-only top 3, 28d, biweekly, BTC > SMA50", lookback=28, k=3, rebalance="biweekly",
+                    weights="equal", long_only=True, side_gross=1.0, regime=True, stop=False)
+REGIME_DAYS = 50
 
 
 @dataclass
@@ -124,11 +133,25 @@ def targets(p: Panel, i: int, v: Variant, rng: np.random.Generator | None = None
             order = order[::-1]                                # long the lowest funding
         top, bottom = order[:v.k], order[-v.k:]
     out = {}
-    for side, legs in ((1.0, top), (-1.0, bottom)):
+    for side, legs in ((1.0, top), (-1.0, bottom))[:1 if v.long_only else 2]:
         raw = np.ones(len(legs)) if v.weights == "equal" else 1 / p.sigma[i, legs]
         for j, w in zip(legs, raw / raw.sum()):
-            out[int(j)] = out.get(int(j), 0.0) + side * w * MAX_GROSS / 2
+            out[int(j)] = out.get(int(j), 0.0) + side * w * v.side_gross
     return out
+
+
+def regime_on(p: Panel) -> np.ndarray:
+    """True on day i when BTC's close on i-1 is above the average of its last REGIME_DAYS closes up to i-1."""
+    btc = pd.Series(p.c[:, p.coins.index("BTC")], index=p.dates)
+    return (btc > btc.rolling(REGIME_DAYS, min_periods=REGIME_DAYS).mean()).shift(1, fill_value=False).values
+
+
+def rebalance_day(v: Variant, day: pd.Timestamp) -> bool:
+    if v.rebalance == "daily":
+        return True
+    if day.weekday() != 0:
+        return False
+    return v.rebalance == "weekly" or (day - pd.Timestamp("2023-01-02")).days // 7 % 2 == 0
 
 
 def simulate(p: Panel, v: Variant, start: str, end: str, equity: float = 200.0,
@@ -139,6 +162,7 @@ def simulate(p: Panel, v: Variant, start: str, end: str, equity: float = 200.0,
     qty: dict[int, float] = {}
     entry: dict[int, tuple[float, float]] = {}     # coin -> (entry price, stop price)
     e = equity
+    on = regime_on(p) if v.regime else np.ones(len(p.dates), bool)
     eq, fees, fund_paid, traded, stops, gross_max = [], 0.0, 0.0, 0.0, 0, 0.0
 
     def trade(j: int, dq: float, px: float) -> None:
@@ -153,9 +177,9 @@ def simulate(p: Panel, v: Variant, start: str, end: str, equity: float = 200.0,
                 trade(j, -qty[j], prev[j]); del qty[j]; entry.pop(j, None)
             else:
                 e += qty[j] * (p.o[i, j] - prev[j])
-        rebal = v.rebalance == "daily" or p.dates[i].weekday() == 0
-        if rebal:
-            tgt = targets(p, i, v, rng)
+        rebal = rebalance_day(v, p.dates[i]) or (on[i] and not on[i - 1])
+        if rebal or not on[i]:
+            tgt = targets(p, i, v, rng) if on[i] else {}
             for j in set(qty) | set(tgt):
                 want = tgt.get(j, 0.0) * e / p.o[i, j]
                 have = qty.get(j, 0.0)
@@ -179,7 +203,7 @@ def simulate(p: Panel, v: Variant, start: str, end: str, equity: float = 200.0,
             e -= f; fund_paid += f
         for j in list(qty):
             q, (_, stop) = qty[j], entry[j]
-            hit = p.l[i, j] <= stop if q > 0 else p.h[i, j] >= stop
+            hit = v.stop and (p.l[i, j] <= stop if q > 0 else p.h[i, j] >= stop)
             if hit:
                 fill = min(p.o[i, j], stop) if q > 0 else max(p.o[i, j], stop)
                 e += q * (fill - p.o[i, j])
@@ -190,6 +214,29 @@ def simulate(p: Panel, v: Variant, start: str, end: str, equity: float = 200.0,
     curve = pd.Series(eq, index=p.dates[lo:hi])
     return {"equity": curve, "fees": fees, "funding": fund_paid, "traded": traded, "stops": stops,
             "gross_max": gross_max, "start_equity": equity}
+
+
+def btc_benchmark(p: Panel, start: str, end: str, regime: bool, equity: float = 200.0) -> dict:
+    """1x BTC, in cash while the regime switch is off (or always held), same costs as the strategy."""
+    j = p.coins.index("BTC")
+    rate = TAKER_FEE + LOW_SLIP["BTC"]
+    on = regime_on(p) if regime else np.ones(len(p.dates), bool)
+    lo, hi = p.dates.searchsorted(pd.Timestamp(start)), p.dates.searchsorted(pd.Timestamp(end), "right")
+    e, qty, eq, fees, fund = equity, 0.0, [], 0.0, 0.0
+    for i in range(lo, hi):
+        o = p.o[i, j]
+        if qty:
+            e += qty * (o - p.c[i - 1, j])
+        if on[i] and not qty:
+            qty = e / o; fees += e * rate; e -= e * rate
+        elif not on[i] and qty:
+            fees += qty * o * rate; e -= qty * o * rate; qty = 0.0
+        if qty:
+            f = qty * o * p.fund[i, j]; e -= f; fund += f
+            e += qty * (p.c[i, j] - o)
+        eq.append(e)
+    return {"equity": pd.Series(eq, index=p.dates[lo:hi]), "fees": fees, "funding": fund, "traded": 0.0,
+            "stops": 0, "gross_max": 1.0, "start_equity": equity}
 
 
 def stats(res: dict, btc: pd.Series | None = None) -> dict:
@@ -248,6 +295,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--data", required=True, help="folder written by xs_fetch.py")
     ap.add_argument("--holdout", action="store_true", help="evaluate the hold-out period (only after the dev gates)")
     ap.add_argument("--perm", type=int, default=0, help="shuffled-pick runs for the main variant")
+    ap.add_argument("--long-only", action="store_true",
+                    help="docs/prereg-long-only-momentum.md: long-only top 3 with the BTC switch, vs BTC benchmarks")
     ap.add_argument("--json", help="write all numbers here")
     a = ap.parse_args(argv)
     daily, funding = load(a.data)
@@ -259,6 +308,28 @@ def main(argv: list[str] | None = None) -> None:
     end = end or str(p.dates[-1].date())
     btc = pd.Series(p.c[:, p.coins.index("BTC")], index=p.dates).pct_change() if "BTC" in p.coins else None
     print(f"{len(p.coins)} coins, {len(funding)} with funding, {start} .. {end}\n")
+    if a.long_only:
+        runs = {LONG_ONLY.name: simulate(p, LONG_ONLY, start, end),
+                "same, 0.15% slippage": simulate(p, replace(LONG_ONLY, slip=0.0015), start, end),
+                "BTC 1x + same switch": btc_benchmark(p, start, end, regime=True),
+                "BTC buy and hold": btc_benchmark(p, start, end, regime=False)}
+        rows = {k: stats(r, btc) for k, r in runs.items()}
+        on = regime_on(p)[p.dates.searchsorted(pd.Timestamp(start)):p.dates.searchsorted(pd.Timestamp(end), "right")]
+        print(f"BTC switch on {on.mean():.0%} of days\n")
+        print("| run | total | max DD | Sharpe | t | fees | funding | turnover/yr |")
+        print("|---|---|---|---|---|---|---|---|")
+        for k, s in rows.items():
+            print(f"| {k} | {s['total']:+.1%} | {s['max_dd']:.1%} | {s['sharpe']:.2f} | {s['t']:.2f} | "
+                  f"{s['fees']:.1f} | {s['funding']:+.1f} | {s['turnover_x_per_year']:.0f}x |")
+        print("\nYearly:", {y: f"{x:+.1%}" for y, x in rows[LONG_ONLY.name]["years"].items()})
+        m, b = rows[LONG_ONLY.name], rows["BTC 1x + same switch"]
+        print("\nGates (judged on the hold-out only):")
+        for label, ok in [("total > 0", m["total"] > 0), ("beats BTC 1x + same switch", m["total"] > b["total"]),
+                          ("max DD smaller than 30%", m["max_dd"] > -0.30)]:
+            print(f"  [{'PASS' if ok else 'FAIL'}] {label}")
+        if a.json:
+            Path(a.json).write_text(json.dumps(rows, default=float, indent=1))
+        return
     rows = {}
     for v in VARIANTS:
         rows[v.name] = stats(simulate(p, v, start, end), btc)

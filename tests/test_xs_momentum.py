@@ -97,3 +97,39 @@ def test_short_squeeze_hits_the_stop():
     p = xs.build_panel(data, {})
     res = xs.simulate(p, xs.VARIANTS[0], "2023-04-01", "2023-07-01")
     assert res["stops"] >= 1
+
+
+def with_btc(data, btc_close):
+    data = dict(data)
+    data["BTC"] = frame(btc_close)
+    return data
+
+
+def test_long_only_weights_and_biweekly_schedule():
+    p = xs.build_panel(with_btc(walks(seed=4), 100 * np.exp(np.linspace(0, 1, len(DATES)))), {})
+    tgt = xs.targets(p, 200, xs.LONG_ONLY)
+    assert len(tgt) == 3 and all(w > 0 for w in tgt.values())
+    assert abs(sum(tgt.values()) - 1.0) < 1e-9
+    mondays = [d for d in DATES if xs.rebalance_day(xs.LONG_ONLY, d)]
+    assert all(d.weekday() == 0 for d in mondays)
+    assert all((b - a).days == 14 for a, b in zip(mondays, mondays[1:]))
+
+
+def test_regime_off_means_cash():
+    falling = 100 * np.exp(np.linspace(0, -1, len(DATES)))      # BTC always below its 50-day average
+    p = xs.build_panel(with_btc(walks(seed=5), falling), {})
+    res = xs.simulate(p, xs.LONG_ONLY, "2023-04-01", "2023-12-31")
+    assert res["traded"] == 0 and res["equity"].iloc[-1] == 200
+    rising = 100 * np.exp(np.linspace(0, 1, len(DATES)))
+    p = xs.build_panel(with_btc(walks(seed=5), rising), {})
+    assert xs.simulate(p, xs.LONG_ONLY, "2023-04-01", "2023-12-31")["traded"] > 0
+
+
+def test_btc_benchmark_follows_btc():
+    rising = 100 * np.exp(np.linspace(0, 1, len(DATES)))
+    p = xs.build_panel(with_btc(walks(seed=6), rising), {})
+    res = xs.btc_benchmark(p, "2023-04-01", "2023-12-31", regime=False)
+    i0, i1 = p.dates.get_loc(pd.Timestamp("2023-04-01")), p.dates.get_loc(pd.Timestamp("2023-12-31"))
+    btc = p.coins.index("BTC")
+    gross = p.c[i1, btc] / p.o[i0, btc]
+    assert abs(res["equity"].iloc[-1] / 200 / gross - 1) < 0.002
