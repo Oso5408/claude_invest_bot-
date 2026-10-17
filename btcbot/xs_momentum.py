@@ -225,6 +225,7 @@ def load(folder: str | Path) -> tuple[dict, dict]:
     daily, funding = {}, {}
     for f in sorted(folder.glob("D_*.csv")):
         df = pd.read_csv(f, parse_dates=["date"]).set_index("date")
+        df = df[df["volume"] > 0]      # HL back-fills years of zero-volume bars before a listing: not tradable
         if len(df):
             daily[f.stem[2:]] = df
     for f in sorted(folder.glob("F_*.csv")):
