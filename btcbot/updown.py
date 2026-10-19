@@ -19,6 +19,7 @@ on tiny moves. A failed Polymarket read only leaves those columns empty.
     python -m btcbot.updown run        # loop forever (systemd service updown-bot)
     python -m btcbot.updown once       # make one call now and print it (sends nothing)
     python -m btcbot.updown status     # hit rates: today, 7 days, all, vs baseline
+    python -m btcbot.updown settle     # backfill Polymarket results for every past call
 """
 
 from __future__ import annotations
@@ -122,10 +123,12 @@ def pm_quote(window, get=requests.get) -> dict:
 
 
 def pm_result(window, get=requests.get) -> str | None:
-    """'UP' / 'DOWN' once Polymarket has settled the market, else None."""
+    """'UP' / 'DOWN' once Polymarket has settled the market, 'NA' if it has no such market, else None."""
     try:
         mk = pm_market(window, get)
-        if not mk or not mk.get("closed"):
+        if not mk:
+            return "NA"  # don't keep asking for a market that doesn't exist
+        if not mk.get("closed"):
             return None
         up = float(json.loads(mk["outcomePrices"])[0])
         return "UP" if up >= 0.99 else "DOWN" if up <= 0.01 else None
@@ -133,13 +136,18 @@ def pm_result(window, get=requests.get) -> str | None:
         return None
 
 
-def pm_settle(df: pd.DataFrame, now: datetime, get=requests.get, limit: int = 3) -> pd.DataFrame:
-    """Fill pm_result for up to `limit` recent calls whose candle ended at least a minute ago."""
+def pm_settle(df: pd.DataFrame, now: datetime, get=requests.get, limit: int | None = 12,
+              max_age: timedelta | None = timedelta(hours=48), pause: float = 0.0) -> pd.DataFrame:
+    """Fill pm_result for up to `limit` unsettled calls, oldest first. Polymarket closes a market some
+    minutes after it ends, so the oldest ones are the ones most likely to be settled by now."""
     df = df.copy()
     t = pd.to_datetime(df["window"], utc=True)
-    todo = df.index[df["pm_result"].isna() & (t + WINDOW + timedelta(minutes=1) <= now) & (t >= now - timedelta(hours=6))]
-    for i in list(todo)[-limit:]:
+    todo = df["pm_result"].isna() & (t + WINDOW + timedelta(minutes=1) <= now)
+    if max_age is not None:
+        todo &= t >= now - max_age
+    for i in list(df.index[todo])[:limit]:
         df.at[i, "pm_result"] = pm_result(df.at[i, "window"], get)
+        time.sleep(pause)
     return df
 
 
@@ -267,12 +275,16 @@ def run(data: Path) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description="BTC 5-minute up/down calls on Telegram (no trading)")
-    p.add_argument("command", choices=["run", "once", "status"])
+    p.add_argument("command", choices=["run", "once", "status", "settle"])
     p.add_argument("--data", default="data")
     a = p.parse_args(argv)
     data = Path(a.data)
     if a.command == "status":
         print(summary(data))
+    elif a.command == "settle":  # backfill every unsettled Polymarket result
+        df = pm_settle(load(data), datetime.now(timezone.utc), limit=None, max_age=None, pause=0.2)
+        save(data, df)
+        print(f"Polymarket 結果：{df['pm_result'].notna().sum()}/{len(df)} 支；有盤口價：{df['pm_up_mid'].notna().sum()} 支")
     elif a.command == "once":
         now = datetime.now(timezone.utc)
         w = window_start(now)

@@ -110,5 +110,15 @@ def test_step_sends_scores_and_summarises(tmp_path):
     assert df.loc[0, "pm_result"] == "DOWN" and "Polymarket 對比（1 支" in out
 
 
+def test_settle_reaches_older_calls_first():
+    now = datetime(2026, 10, 17, 12, 0, tzinfo=timezone.utc)
+    wins = pd.date_range("2026-10-17 10:00", periods=20, freq="5min", tz="UTC")
+    df = pd.DataFrame({c: None for c in updown.COLUMNS}, index=range(20))
+    df["window"] = [w.isoformat() for w in wins]
+    settled = {int(w.timestamp()): 1 for w in wins[:5]}  # only the oldest five are closed on Polymarket
+    out = updown.pm_settle(df, now, _polymarket(settled), limit=12)
+    assert out["pm_result"].iloc[:5].tolist() == ["UP"] * 5 and out["pm_result"].iloc[5:].isna().all()
+
+
 def test_summary_without_data(tmp_path):
     assert "未有紀錄" in updown.summary(tmp_path)
